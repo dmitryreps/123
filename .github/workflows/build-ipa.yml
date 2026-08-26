@@ -6,7 +6,11 @@ on:
 
 jobs:
   ipa:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -23,7 +27,10 @@ jobs:
             https://github.com/SagerNet/sing-box-for-apple.git src
 
       - name: Show Xcode
-        run: xcodebuild -version && xcodebuild -showsdks
+        run: |
+          echo "RUNNER=${{ matrix.os }}"
+          xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Build SFI unsigned
         working-directory: src
@@ -68,7 +75,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: SFI-unsigned
+          name: SFI-unsigned-${{ matrix.os }}
           path: SFI-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
