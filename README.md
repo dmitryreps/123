@@ -1,13 +1,13 @@
 # Unsigned iOS IPA
 
-GitHub Actions builds an unsigned `.ipa` of [SFI](https://github.com/SagerNet/sing-box-for-apple) (scheme `SFI`).
+GitHub Actions builds [Libbox](https://github.com/SagerNet/sing-box) then an unsigned `.ipa` of [SFI](https://github.com/SagerNet/sing-box-for-apple) (scheme `SFI`).
 Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobileprovision`.
 
 ## Build
 
 1. **Actions** → **Build unsigned IPA** → **Run workflow**
-2. Wait 20–40 minutes
-3. Download artifact `SFI-unsigned.ipa`
+2. Wait 40–70 minutes (`macos-15`: Libbox + Xcode)
+3. Download artifact `SFI-unsigned-macos-15`
 
 ## Sign and install
 

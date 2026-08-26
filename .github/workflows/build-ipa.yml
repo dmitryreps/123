@@ -6,11 +6,7 @@ on:
 
 jobs:
   ipa:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     timeout-minutes: 90
     permissions:
       contents: read
@@ -19,21 +15,59 @@ jobs:
       - name: Checkout wrapper
         uses: actions/checkout@v4
 
-      - name: Clone sing-box-for-apple
+      - name: Clone sources
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch dev \
-            --recurse-submodules \
-            https://github.com/SagerNet/sing-box-for-apple.git src
+          git clone --depth 1 https://github.com/SagerNet/sing-box.git sing-box
+          git clone --depth 1 --branch dev --recurse-submodules \
+            https://github.com/SagerNet/sing-box-for-apple.git sing-box-for-apple
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sing-box/go.mod
+          cache-dependency-path: sing-box/go.sum
+
+      - name: Install gomobile
+        working-directory: sing-box
+        run: |
+          set -euo pipefail
+          make lib_install
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile version || true
+          gomobile init
+
+      - name: Build Libbox
+        working-directory: sing-box
+        run: |
+          set -euo pipefail
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          go run ./cmd/internal/build_libbox -target apple -platform ios
+          if [ ! -d ../sing-box-for-apple/Libbox.xcframework ]; then
+            test -d Libbox.xcframework
+            mv Libbox.xcframework ../sing-box-for-apple/
+          fi
+          shopt -s nullglob
+          for framework in ../sing-box-for-apple/Libbox.xcframework/ios-*/Libbox.framework; do
+            if [ -d "$framework/Versions/A" ]; then
+              shallow="${framework}.shallow"
+              rm -rf "$shallow"
+              ditto "$framework/Versions/A" "$shallow"
+              rm -rf "$framework"
+              mv "$shallow" "$framework"
+            fi
+          done
+          test -d ../sing-box-for-apple/Libbox.xcframework
+          ls -la ../sing-box-for-apple/Libbox.xcframework
 
       - name: Show Xcode
         run: |
-          echo "RUNNER=${{ matrix.os }}"
+          echo "RUNNER=macos-15"
           xcodebuild -version
           xcodebuild -showsdks
 
       - name: Build SFI unsigned
-        working-directory: src
+        working-directory: sing-box-for-apple
         env:
           DISABLE_SWIFTLINT: "1"
         run: |
@@ -75,7 +109,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: SFI-unsigned-${{ matrix.os }}
+          name: SFI-unsigned-macos-15
           path: SFI-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
