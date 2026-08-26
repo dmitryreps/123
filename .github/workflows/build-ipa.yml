@@ -1,5 +1,4 @@
-# Неподписанный SFI IPA для переподписи в ESign / Feather / KSign.
-# Запуск: Actions → Build unsigned IPA → Run workflow.
+# Unsigned SFI IPA. Actions → Build unsigned IPA → Run workflow.
 name: Build unsigned IPA
 
 on:
