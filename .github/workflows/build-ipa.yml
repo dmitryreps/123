@@ -1,0 +1,75 @@
+# Неподписанный SFI IPA для переподписи в ESign / Feather / KSign.
+# Запуск: Actions → Build unsigned IPA → Run workflow.
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@v4
+
+      - name: Clone sing-box-for-apple
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch dev \
+            --recurse-submodules \
+            https://github.com/SagerNet/sing-box-for-apple.git src
+
+      - name: Show Xcode
+        run: xcodebuild -version && xcodebuild -showsdks
+
+      - name: Build SFI unsigned
+        working-directory: src
+        env:
+          DISABLE_SWIFTLINT: "1"
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project sing-box.xcodeproj \
+            -scheme SFI \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" \
+            -maxdepth 1 -type d -name "*.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "SFI .app not found"
+            find "$RUNNER_TEMP/DerivedData" -name "*.app" | head -20
+            exit 1
+          fi
+          echo "APP=$APP"
+          find "$APP" -name "*.appex" -print
+          rm -rf "$RUNNER_TEMP/ipa"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP")"
+          (
+            cd "$RUNNER_TEMP/ipa"
+            zip -qry "$GITHUB_WORKSPACE/SFI-unsigned.ipa" Payload
+          )
+          ls -lh "$GITHUB_WORKSPACE/SFI-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: SFI-unsigned
+          path: SFI-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
