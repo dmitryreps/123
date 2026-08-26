@@ -6,7 +6,7 @@ on:
 
 jobs:
   ipa:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     permissions:
       contents: read
@@ -62,7 +62,7 @@ jobs:
 
       - name: Show Xcode
         run: |
-          echo "RUNNER=macos-15"
+          echo "RUNNER=macos-26"
           xcodebuild -version
           xcodebuild -showsdks
 
@@ -109,7 +109,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: SFI-unsigned-macos-15
+          name: SFI-unsigned-macos-26
           path: SFI-unsigned.ipa
           if-no-files-found: error
           retention-days: 14

@@ -6,8 +6,8 @@ Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobil
 ## Build
 
 1. **Actions** → **Build unsigned IPA** → **Run workflow**
-2. Wait 40–70 minutes (`macos-15`: Libbox + Xcode)
-3. Download artifact `SFI-unsigned-macos-15`
+2. Wait 40–70 minutes (`macos-26`: Libbox + Xcode 26)
+3. Download artifact `SFI-unsigned-macos-26`
 
 ## Sign and install
 
