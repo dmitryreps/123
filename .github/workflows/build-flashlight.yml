@@ -1,0 +1,66 @@
+# Unsigned flashlight IPA. Actions → Build unsigned flashlight → Run workflow.
+name: Build unsigned flashlight
+
+on:
+  workflow_dispatch:
+
+jobs:
+  flashlight:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          echo "RUNNER=macos-15"
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build unsigned
+        working-directory: flashlight
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Flashlight.xcodeproj \
+            -scheme Flashlight \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" \
+            -maxdepth 1 -type d -name "Flashlight.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "Flashlight.app not found"
+            find "$RUNNER_TEMP/DerivedData" -name "*.app" | head -20
+            exit 1
+          fi
+          echo "APP=$APP"
+          rm -rf "$RUNNER_TEMP/ipa"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/Flashlight.app"
+          (
+            cd "$RUNNER_TEMP/ipa"
+            zip -qry "$GITHUB_WORKSPACE/Flashlight-unsigned.ipa" Payload
+          )
+          ls -lh "$GITHUB_WORKSPACE/Flashlight-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashlight-unsigned
+          path: Flashlight-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

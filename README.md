@@ -16,4 +16,11 @@ Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobil
 3. Settings → General → Device Management → Trust the developer
 4. Open the app and add a profile
 
+## Flashlight test app
+
+1. **Actions** → **Build unsigned flashlight** → **Run workflow**
+2. Wait about 5 minutes (`macos-15`)
+3. Download artifact `Flashlight-unsigned`
+4. Sign in ESign the same way. There is no `.appex`. Change the bundle ID to match your provision if asked.
+
 Do not commit `.p12`, passwords, or live configs.
