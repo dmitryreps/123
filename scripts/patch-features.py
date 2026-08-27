@@ -166,10 +166,35 @@ AGENT_CENTER = '''#if os(iOS)
         @Published var buildInfo: AgentBuildInfo?
         @Published var downloadedFile: URL?
         @Published var showShare = false
+        @Published var showQR = false
+        @Published var shareLink = ""
+        @Published var alert: AlertState?
 
-        private func fail(_ event: String, _ message: String) {
+        func fail(_ event: String, _ message: String) {
             status = message
+            alert = AlertState(errorMessage: message)
             DiagnosticsLog.log("app", event, message)
+        }
+
+        func ok(_ event: String, _ message: String) {
+            status = message
+            alert = AlertState(title: "OK", message: message)
+            DiagnosticsLog.log("app", event, message)
+        }
+
+        func importShareLink(_ raw: String, environments: ExtensionEnvironments) async {
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return fail("share-empty", "Paste a vless share link first") }
+            busy = true
+            defer { busy = false }
+            do {
+                let parsed = try VLESSImport.profile(from: text)
+                try await ShareLinkImport.save(name: parsed.name, json: parsed.json, environments: environments)
+                shareLink = ""
+                ok("share-imported", "Profile \\(parsed.name) imported. Open Dashboard and start it.")
+            } catch {
+                fail("share-error", error.localizedDescription)
+            }
         }
 
         func sendDiagnostics() async {
@@ -187,29 +212,40 @@ AGENT_CENTER = '''#if os(iOS)
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if code == 200 {
-                    status = "report sent: \\(text)"
-                    DiagnosticsLog.log("app", "send-report-ok", text)
+                    ok("send-report-ok", "Diagnostics sent. Tell the agent the report left the phone.")
                 } else {
-                    fail("send-report-fail", "report failed: http \\(code)")
+                    fail("send-report-fail", "report failed: http \\(code) \\(text)")
                 }
             } catch {
                 fail("send-report-error", "report error: \\(error.localizedDescription)")
             }
         }
 
-        func reloadManifest() async {
-            guard AgentAPI.configured else { return fail("manifest-skip", "agent api not configured") }
+        func reloadManifest(userInitiated: Bool = false) async {
+            guard AgentAPI.configured else {
+                if userInitiated { fail("manifest-skip", "agent api not configured") }
+                return
+            }
             do {
                 let request = try AgentAPI.request("manifest")
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    return fail("manifest-fail", "manifest http \\((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                    let message = "manifest http \\((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                    if userInitiated { fail("manifest-fail", message) } else { DiagnosticsLog.log("app", "manifest-fail", message) }
+                    return
                 }
                 let manifest = try JSONDecoder().decode(AgentManifest.self, from: data)
                 profiles = manifest.profiles ?? []
                 DiagnosticsLog.log("app", "manifest-ok", "count=\\(profiles.count)")
+                if userInitiated {
+                    ok("manifest-ok", profiles.isEmpty ? "No profiles on server yet." : "Loaded \\(profiles.count) profile(s).")
+                }
             } catch {
-                fail("manifest-error", "manifest error: \\(error.localizedDescription)")
+                if userInitiated {
+                    fail("manifest-error", "manifest error: \\(error.localizedDescription)")
+                } else {
+                    DiagnosticsLog.log("app", "manifest-error", error.localizedDescription)
+                }
             }
         }
 
@@ -232,13 +268,13 @@ AGENT_CENTER = '''#if os(iOS)
                     existing.lastUpdated = Date()
                     try await ProfileManager.update(existing)
                     status = "updated: \\(entry.name)"
-                    DiagnosticsLog.log("app", "profile-updated", entry.name)
+                    ok("profile-updated", "Updated \\(entry.name). Start it from Dashboard.")
                 } else {
                     let profile = Profile(name: entry.name, type: .local, path: "agent-\\(entry.name).json", lastUpdated: Date())
                     try await ProfileManager.create(profile)
                     try await profile.writeAsync(content)
                     status = "imported: \\(entry.name)"
-                    DiagnosticsLog.log("app", "profile-imported", entry.name)
+                    ok("profile-imported", "Imported \\(entry.name). Start it from Dashboard.")
                 }
                 environments.postReload()
             } catch {
@@ -246,18 +282,30 @@ AGENT_CENTER = '''#if os(iOS)
             }
         }
 
-        func checkBuild() async {
-            guard AgentAPI.configured else { return fail("build-skip", "agent api not configured") }
+        func checkBuild(userInitiated: Bool = false) async {
+            guard AgentAPI.configured else {
+                if userInitiated { fail("build-skip", "agent api not configured") }
+                return
+            }
             do {
                 let request = try AgentAPI.request("build")
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    return fail("build-fail", "build info http \\((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                    let message = "build info http \\((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                    if userInitiated { fail("build-fail", message) } else { DiagnosticsLog.log("app", "build-fail", message) }
+                    return
                 }
                 buildInfo = try JSONDecoder().decode(AgentBuildInfo.self, from: data)
                 DiagnosticsLog.log("app", "build-info", buildInfo?.version ?? "?")
+                if userInitiated {
+                    ok("build-info", "Server build: \\(buildInfo?.version ?? "?"). Installed: \\(Bundle.main.infoDictionary?[\"CFBundleShortVersionString\"] as? String ?? \"?\")")
+                }
             } catch {
-                fail("build-error", "build info error: \\(error.localizedDescription)")
+                if userInitiated {
+                    fail("build-error", "build info error: \\(error.localizedDescription)")
+                } else {
+                    DiagnosticsLog.log("app", "build-error", error.localizedDescription)
+                }
             }
         }
 
@@ -280,8 +328,7 @@ AGENT_CENTER = '''#if os(iOS)
                 try FileManager.default.moveItem(at: tmpURL, to: dest)
                 downloadedFile = dest
                 showShare = true
-                status = "downloaded: \\(file)"
-                DiagnosticsLog.log("app", "build-downloaded", file)
+                ok("build-downloaded", "Downloaded \\(file). Share the file into ESign.")
             } catch {
                 fail("download-error", "download error: \\(error.localizedDescription)")
             }
@@ -310,6 +357,34 @@ AGENT_CENTER = '''#if os(iOS)
 
         public var body: some View {
             FormView {
+                Section("Share link") {
+                    TextField("vless://...", text: $viewModel.shareLink)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    FormButton {
+                        Task { await viewModel.importShareLink(viewModel.shareLink, environments: environments) }
+                    } label: {
+                        Label("Import share link", systemImage: "link")
+                    }
+                    .disabled(viewModel.busy)
+                    FormButton {
+                        if let text = UIPasteboard.general.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            viewModel.shareLink = text
+                            Task { await viewModel.importShareLink(text, environments: environments) }
+                        } else {
+                            viewModel.fail("clipboard-empty", "Clipboard is empty")
+                        }
+                    } label: {
+                        Label("Paste and import", systemImage: "doc.on.clipboard")
+                    }
+                    .disabled(viewModel.busy)
+                    FormButton {
+                        viewModel.showQR = true
+                    } label: {
+                        Label("Scan QR", systemImage: "qrcode.viewfinder")
+                    }
+                    .disabled(viewModel.busy)
+                }
                 if !AgentAPI.configured {
                     Section {
                         Text("agent api not configured")
@@ -345,7 +420,7 @@ AGENT_CENTER = '''#if os(iOS)
                             .disabled(viewModel.busy)
                         }
                         FormButton {
-                            Task { await viewModel.reloadManifest() }
+                            Task { await viewModel.reloadManifest(userInitiated: true) }
                         } label: {
                             Label("Refresh", systemImage: "arrow.clockwise")
                         }
@@ -363,7 +438,7 @@ AGENT_CENTER = '''#if os(iOS)
                             .disabled(viewModel.busy)
                         }
                         FormButton {
-                            Task { await viewModel.checkBuild() }
+                            Task { await viewModel.checkBuild(userInitiated: true) }
                         } label: {
                             Label("Check for build", systemImage: "arrow.triangle.2.circlepath")
                         }
@@ -378,6 +453,16 @@ AGENT_CENTER = '''#if os(iOS)
                 }
             }
             .navigationTitle("Agent")
+            .alert($viewModel.alert)
+            .sheet(isPresented: $viewModel.showQR) {
+                QRScannerView { result in
+                    viewModel.showQR = false
+                    if let text = result.string {
+                        viewModel.shareLink = text
+                        Task { await viewModel.importShareLink(text, environments: environments) }
+                    }
+                }
+            }
             .sheet(isPresented: $viewModel.showShare) {
                 if let url = viewModel.downloadedFile {
                     ActivityShareSheet(activityItems: [url])
@@ -403,6 +488,12 @@ def main() -> None:
     agent_center = agent_center.replace("%%IPA_API_TOKEN%%", api_token or "%%IPA_API_TOKEN%%")
 
     write_file(ROOT / "Library" / "Shared" / "DiagnosticsLog.swift", DIAGNOSTICS_LOG)
+    include = Path(__file__).resolve().parent / "include"
+    write_file(ROOT / "Library" / "Shared" / "VLESSImport.swift", (include / "VLESSImport.swift").read_text(encoding="utf-8"))
+    write_file(
+        ROOT / "ApplicationLibrary" / "Views" / "Profile" / "ShareLinkImport.swift",
+        (include / "ShareLinkImport.swift").read_text(encoding="utf-8"),
+    )
     write_file(ROOT / "ApplicationLibrary" / "Views" / "Tools" / "AgentCenterView.swift", agent_center)
     print("CONFIG", "api url set" if api_url else "api url MISSING (feature disabled at runtime)")
 
@@ -476,6 +567,68 @@ def main() -> None:
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>""",
+    )
+
+    replace_once(
+        ROOT / "ApplicationLibrary" / "Views" / "Profile" / "NewProfileMenuView.swift",
+        "import SwiftUI\nimport UniformTypeIdentifiers\n",
+        "import SwiftUI\nimport UniformTypeIdentifiers\n#if canImport(UIKit)\n    import UIKit\n#endif\n",
+    )
+    replace_once(
+        ROOT / "ApplicationLibrary" / "Views" / "Profile" / "NewProfileMenuView.swift",
+        '''                #if !os(tvOS)
+                    FormButton {
+                        showQRScanner = true
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                    }
+                #endif
+''',
+        '''                #if !os(tvOS)
+                    FormButton {
+                        showQRScanner = true
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                    }
+                    #if os(iOS)
+                        FormButton {
+                            if let text = UIPasteboard.general.string {
+                                handleQRCodeString(text)
+                            } else {
+                                alert = AlertState(errorMessage: String(localized: "Clipboard is empty"))
+                            }
+                        } label: {
+                            Label("Paste share link", systemImage: "doc.on.clipboard")
+                        }
+                    #endif
+                #endif
+''',
+    )
+    replace_once(
+        ROOT / "ApplicationLibrary" / "Views" / "Profile" / "NewProfileMenuView.swift",
+        '''        private func handleQRCodeString(_ string: String) {
+            var error: NSError?
+            let remoteProfile = LibboxParseRemoteProfileImportLink(string, &error)
+''',
+        '''        private func handleQRCodeString(_ string: String) {
+            if VLESSImport.looksLike(string) {
+                Task {
+                    do {
+                        let parsed = try VLESSImport.profile(from: string)
+                        try await ShareLinkImport.save(name: parsed.name, json: parsed.json, environments: environments)
+                        alert = AlertState(
+                            title: String(localized: "Imported"),
+                            message: "Profile \\(parsed.name) is ready. Start it from Dashboard."
+                        )
+                    } catch {
+                        alert = AlertState(action: "import share link", error: error)
+                    }
+                }
+                return
+            }
+            var error: NSError?
+            let remoteProfile = LibboxParseRemoteProfileImportLink(string, &error)
+''',
     )
 
     profile = ROOT / "Library" / "Network" / "ExtensionProfile.swift"

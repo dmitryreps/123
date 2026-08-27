@@ -88,7 +88,7 @@ jobs:
           DISABLE_SWIFTLINT: "1"
           SIDELOAD_BUNDLE_ID: app.bronze6658.lychee6856
           SIDELOAD_APP_GROUP: group.a05b266105020512.1
-          SIDELOAD_VERSION: "1.0.4"
+          SIDELOAD_VERSION: "1.0.5"
         run: |
           set -euo pipefail
           xcodebuild \
@@ -105,7 +105,7 @@ jobs:
             BASE_PACKAGE_IDENTIFIER="$SIDELOAD_BUNDLE_ID" \
             APP_GROUP_IDENTIFIER="$SIDELOAD_APP_GROUP" \
             MARKETING_VERSION="$SIDELOAD_VERSION" \
-            CURRENT_PROJECT_VERSION=5 \
+            CURRENT_PROJECT_VERSION=6 \
             build
 
       - name: Package IPA
@@ -127,6 +127,7 @@ jobs:
           find "$APP" -name "*.appex" -print
           test -d "$APP/PlugIns/Extension.appex"
           python3 "$GITHUB_WORKSPACE/scripts/check-bundle-ids.py" "$APP"
+          python3 "$GITHUB_WORKSPACE/scripts/patch-ats.py" "$APP"
           rm -rf "$RUNNER_TEMP/ipa"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           ditto "$APP" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP")"
