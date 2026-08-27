@@ -179,7 +179,7 @@ AGENT_CENTER = '''#if os(iOS)
             DiagnosticsLog.log("app", "send-report-tap")
             var log = DiagnosticsLog.readAll()
             if log.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                log = #"{"event":"empty-log"}"# + "\n"
+                log = "event=empty-log\\n"
             }
             do {
                 let request = try AgentAPI.request("report", query: ["device": "iphone"], method: "POST", body: Data(log.utf8))
