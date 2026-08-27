@@ -177,7 +177,10 @@ AGENT_CENTER = '''#if os(iOS)
             busy = true
             defer { busy = false }
             DiagnosticsLog.log("app", "send-report-tap")
-            let log = DiagnosticsLog.readAll()
+            var log = DiagnosticsLog.readAll()
+            if log.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                log = "{\"event\":\"empty-log\"}\\n"
+            }
             do {
                 let request = try AgentAPI.request("report", query: ["device": "iphone"], method: "POST", body: Data(log.utf8))
                 let (data, response) = try await URLSession.shared.data(for: request)
@@ -455,6 +458,24 @@ def main() -> None:
         ROOT / "SFI" / "ApplicationDelegate.swift",
         '        NSLog("Here I stand")\n',
         '        NSLog("Here I stand")\n        DiagnosticsLog.log("app", "launch")\n',
+    )
+
+    # iOS ATS blocks cleartext HTTP to a public IP. Exception domains do not
+    # apply to numeric hosts; NSAllowsArbitraryLoads is required for this drop.
+    replace_once(
+        ROOT / "SFI" / "Info.plist",
+        """	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>""",
+        """	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>""",
     )
 
     profile = ROOT / "Library" / "Network" / "ExtensionProfile.swift"
