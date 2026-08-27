@@ -50,6 +50,7 @@ public enum AgentHTTP {
         let useProxy = AgentSettings.proxyEnabled && AgentSettings.proxyConfigured
         let proxyType = AgentSettings.proxyType
         let started = Date()
+        DiagnosticsLog.log("app", "http-start", "\(method) \(host):\(port) proxy=\(useProxy ? proxyType : "off")")
 
         let connection: NWConnection
         if useProxy {
@@ -58,9 +59,11 @@ public enum AgentHTTP {
             connection = try await connect(host: host, port: port, tls: tls)
         }
         defer { connection.cancel() }
+        DiagnosticsLog.log("app", "http-connect", "ok")
 
         if useProxy, proxyType == "socks5" {
             try await socks5Connect(connection, host: host, port: port)
+            DiagnosticsLog.log("app", "http-socks", "ok")
         }
 
         let path: String
@@ -84,10 +87,12 @@ public enum AgentHTTP {
         var data = Data(packet.utf8)
         data.append(body)
         try await send(connection, data)
+        DiagnosticsLog.log("app", "http-sent", "bytes=\(data.count)")
         let raw = try await receiveAll(connection, limit: 80_000_000)
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-        DiagnosticsLog.log("app", "http-ok", "status wait \(elapsed)ms")
-        return try parseHTTP(raw)
+        let reply = try parseHTTP(raw)
+        DiagnosticsLog.log("app", "http-reply", "status=\(reply.status) bytes=\(reply.body.count) \(elapsed)ms")
+        return reply
     }
 
     public static func pingProxy() async throws -> Int {
@@ -211,6 +216,7 @@ public enum AgentHTTP {
                 break
             }
         }
+        DiagnosticsLog.log("app", "http-recv", "bytes=\(data.count)")
         return data
     }
 
