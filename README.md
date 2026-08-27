@@ -11,13 +11,14 @@ Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobil
 
 ## Sign and install
 
-1. Import `.p12` + `.mobileprovision` into the signer
-2. Import `SFI-unsigned.ipa` → Sign
-3. Do **not** change the bundle ID (it already matches the provision)
-4. Do **not** lower the iOS version
-5. Keep the remaining `.appex`
-6. Settings → General → Device Management → Trust the developer
-7. Open the app and add a profile
+1. Delete any greyed-out previous install of the app first
+2. Import `.p12` + `.mobileprovision` into the signer
+3. Import `SFI-unsigned.ipa` → Sign
+4. Do **not** change the bundle ID of the main app
+5. Do **not** lower the iOS version
+6. Keep the remaining `.appex`
+7. Settings → General → Device Management → Trust the developer
+8. Open the app and add a profile
 
 ## Flashlight test app
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Align the Apple client with a single-id sideload provision."""
+"""Align app group / entitlements. Do not force one bundle id onto plugins."""
 
 from __future__ import annotations
 
@@ -49,26 +49,6 @@ def main() -> None:
         raise SystemExit("SIDELOAD_BUNDLE_ID and SIDELOAD_APP_GROUP are required")
     print("BUNDLE", bundle_id)
     print("GROUP", app_group)
-
-    app_cfg = ROOT / "Library" / "Shared" / "AppConfiguration.swift"
-    replace_once(
-        app_cfg,
-        """    public static var extensionBundleID: String {
-        \"\\(packageName).extension\"
-    }""",
-        """    public static var extensionBundleID: String {
-        packageName
-    }""",
-    )
-    replace_once(
-        app_cfg,
-        """    public static var systemExtensionBundleID: String {
-        \"\\(packageName).system\"
-    }""",
-        """    public static var systemExtensionBundleID: String {
-        packageName
-    }""",
-    )
 
     file_path = ROOT / "Library" / "Shared" / "FilePath.swift"
     replace_once(
