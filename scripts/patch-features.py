@@ -112,6 +112,8 @@ def main() -> None:
     write_file(ROOT / "Library" / "Shared" / "DiagnosticsLog.swift", DIAGNOSTICS_LOG)
     write_file(ROOT / "Library" / "Shared" / "VLESSImport.swift", (include / "VLESSImport.swift").read_text(encoding="utf-8"))
     write_file(ROOT / "Library" / "Shared" / "AgentSettings.swift", (include / "AgentSettings.swift").read_text(encoding="utf-8"))
+    write_file(ROOT / "Library" / "Shared" / "AgentHTTP.swift", (include / "AgentHTTP.swift").read_text(encoding="utf-8"))
+    write_file(ROOT / "Library" / "Shared" / "SplitTunnel.swift", (include / "SplitTunnel.swift").read_text(encoding="utf-8"))
     write_file(
         ROOT / "ApplicationLibrary" / "Views" / "Profile" / "ShareLinkImport.swift",
         (include / "ShareLinkImport.swift").read_text(encoding="utf-8"),

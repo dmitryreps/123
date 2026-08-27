@@ -121,6 +121,6 @@ public enum VLESSImport {
         guard let json = String(data: data, encoding: .utf8) else {
             throw VLESSImportError.badURL
         }
-        return (name, json)
+        return (name, try SplitTunnel.apply(json))
     }
 }

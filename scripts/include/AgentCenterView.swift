@@ -1,4 +1,5 @@
 #if os(iOS)
+    import Libbox
     import Library
     import SwiftUI
     import UIKit
@@ -43,6 +44,9 @@
         @Published var proxyUser = AgentSettings.proxyUser
         @Published var proxyPassword = AgentSettings.proxyPassword
         @Published var proxyName = "proxy-1"
+        @Published var splitMode = AgentSettings.splitMode
+        @Published var splitApps = AgentSettings.splitApps
+        @Published var splitExtra = AgentSettings.splitExtra
 
         func fail(_ event: String, _ message: String) {
             status = message
@@ -57,27 +61,22 @@
         }
 
         func saveServer() {
-            AgentSettings.baseURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            AgentSettings.apiToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            ok("server-saved", "Server settings saved.")
+            persistServer()
+            ok("server-saved", "Server saved.")
         }
 
         func testServer() async {
-            saveServerQuiet()
-            guard AgentAPI.configured else { return fail("server-test-skip", "Fill URL (http/https) and token, then Save.") }
+            persistServer()
+            persistProxy()
+            guard AgentAPI.configured else { return fail("server-test-skip", "Fill URL (http/https) and token first.") }
             busy = true
             defer { busy = false }
-            let started = Date()
             do {
-                let request = try AgentAPI.request("ping")
-                let (data, response) = try await AgentAPI.session().data(for: request)
-                let ms = Int(Date().timeIntervalSince(started) * 1000)
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                let text = String(data: data, encoding: .utf8) ?? ""
-                if code == 200 {
-                    ok("server-test-ok", "Server reachable in \(ms) ms.")
+                let reply = try await AgentAPI.send("ping")
+                if reply.status == 200 {
+                    ok("server-test-ok", "Server reachable. HTTP \(reply.status).")
                 } else {
-                    fail("server-test-fail", "Test failed: http \(code) \(text)")
+                    fail("server-test-fail", "Test failed: http \(reply.status) \(reply.text)")
                 }
             } catch {
                 fail("server-test-error", "Test failed: \(error.localizedDescription)")
@@ -86,26 +85,25 @@
 
         func saveProxy() {
             persistProxy()
-            ok("proxy-saved", "Proxy settings saved. Enable Use proxy to send reports through it.")
+            ok("proxy-saved", "Proxy saved. Ping checks login, not only the port.")
         }
 
         func pingProxy() async {
             persistProxy()
-            let host = AgentSettings.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            let port = AgentSettings.proxyPort
-            guard !host.isEmpty, port > 0 else { return fail("proxy-ping-skip", "Fill proxy host and port.") }
+            guard AgentSettings.proxyConfigured else { return fail("proxy-ping-skip", "Fill proxy host and port.") }
             busy = true
             defer { busy = false }
             do {
-                let ms = try await AgentAPI.tcpPing(host: host, port: port)
-                ok("proxy-ping-ok", "Proxy \(host):\(port) reachable in \(ms) ms.")
+                let ms = try await AgentHTTP.pingProxy()
+                ok("proxy-ping-ok", "Proxy login OK in \(ms) ms. You can turn on “Use proxy for agent”.")
             } catch {
-                fail("proxy-ping-error", "Proxy ping failed: \(error.localizedDescription)")
+                fail("proxy-ping-error", "Proxy handshake failed: \(error.localizedDescription)")
             }
         }
 
         func importProxy(environments: ExtensionEnvironments) async {
             persistProxy()
+            persistSplit()
             let host = AgentSettings.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
             let port = AgentSettings.proxyPort
             let name = proxyName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -123,31 +121,57 @@
                     password: AgentSettings.proxyPassword,
                     environments: environments
                 )
-                ok("proxy-imported", "Profile \(name) imported. Open Dashboard and start it.")
+                ok("proxy-imported", "Profile “\(name)” saved. Open Dashboard, start it, then stop/start if it was already running.")
             } catch {
                 fail("proxy-import-error", error.localizedDescription)
             }
         }
 
+        func applySplit(environments: ExtensionEnvironments) async {
+            persistSplit()
+            busy = true
+            defer { busy = false }
+            do {
+                let id = await SharedPreferences.selectedProfileID.get()
+                guard id > 0, let profile = try await ProfileManager.get(id) else {
+                    return fail("split-skip", "Open Dashboard and select a profile first.")
+                }
+                let json = try await profile.readAsync()
+                let patched = try SplitTunnel.apply(json)
+                var error: NSError?
+                LibboxCheckConfig(patched, &error)
+                if let error { throw error }
+                try await profile.writeAsync(patched)
+                profile.lastUpdated = Date()
+                try await ProfileManager.update(profile)
+                environments.postReload()
+                environments.profileUpdate.send()
+                ok("split-applied", "Split tunnel saved on “\(profile.name)”. Stop and start the tunnel once.")
+            } catch {
+                fail("split-error", error.localizedDescription)
+            }
+        }
+
         func importShareLink(_ raw: String, environments: ExtensionEnvironments) async {
+            persistSplit()
             let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return fail("share-empty", "Paste a vless share link first") }
+            guard !text.isEmpty else { return fail("share-empty", "Paste a share link first.") }
             busy = true
             defer { busy = false }
             do {
                 let parsed = try VLESSImport.profile(from: text)
                 try await ShareLinkImport.save(name: parsed.name, json: parsed.json, environments: environments)
                 shareLink = ""
-                ok("share-imported", "Profile \(parsed.name) imported. Open Dashboard and start it.")
+                ok("share-imported", "Profile “\(parsed.name)” imported. Start it from Dashboard.")
             } catch {
                 fail("share-error", error.localizedDescription)
             }
         }
 
         func sendDiagnostics() async {
-            saveServerQuiet()
+            persistServer()
             persistProxy()
-            guard AgentAPI.configured else { return fail("send-report-skip", "Fill server URL and token, then Save and Test.") }
+            guard AgentAPI.configured else { return fail("send-report-skip", "Fill server URL and token, then Test.") }
             busy = true
             defer { busy = false }
             DiagnosticsLog.log("app", "send-report-tap")
@@ -156,14 +180,11 @@
                 log = "event=empty-log\n"
             }
             do {
-                let request = try AgentAPI.request("report", query: ["device": "iphone"], method: "POST", body: Data(log.utf8))
-                let (data, response) = try await AgentAPI.session().data(for: request)
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if code == 200 {
-                    ok("send-report-ok", "Diagnostics sent. Tell the agent the report left the phone.")
+                let reply = try await AgentAPI.send("report", query: ["device": "iphone"], method: "POST", body: Data(log.utf8))
+                if reply.status == 200 {
+                    ok("send-report-ok", "Diagnostics sent.")
                 } else {
-                    fail("send-report-fail", "report failed: http \(code) \(text)")
+                    fail("send-report-fail", "report failed: http \(reply.status) \(reply.text)")
                 }
             } catch {
                 fail("send-report-error", "report error: \(error.localizedDescription)")
@@ -176,14 +197,13 @@
                 return
             }
             do {
-                let request = try AgentAPI.request("manifest")
-                let (data, response) = try await AgentAPI.session().data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    let message = "manifest http \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                let reply = try await AgentAPI.send("manifest")
+                guard reply.status == 200 else {
+                    let message = "manifest http \(reply.status)"
                     if userInitiated { fail("manifest-fail", message) } else { DiagnosticsLog.log("app", "manifest-fail", message) }
                     return
                 }
-                let manifest = try JSONDecoder().decode(AgentManifest.self, from: data)
+                let manifest = try JSONDecoder().decode(AgentManifest.self, from: reply.body)
                 profiles = manifest.profiles ?? []
                 DiagnosticsLog.log("app", "manifest-ok", "count=\(profiles.count)")
                 if userInitiated {
@@ -199,17 +219,17 @@
         }
 
         func importProfile(_ entry: AgentManifest.Entry, environments: ExtensionEnvironments) async {
+            persistSplit()
             guard AgentAPI.configured else { return fail("profile-skip", "Fill server URL and token first.") }
             busy = true
             defer { busy = false }
             DiagnosticsLog.log("app", "fetch-profile", entry.name)
             do {
-                let request = try AgentAPI.request("config", query: ["name": entry.name])
-                let (data, response) = try await AgentAPI.session().data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    return fail("profile-fail", "\(entry.name): http \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                let reply = try await AgentAPI.send("config", query: ["name": entry.name])
+                guard reply.status == 200 else {
+                    return fail("profile-fail", "\(entry.name): http \(reply.status)")
                 }
-                guard let content = String(data: data, encoding: .utf8), content.contains("{") else {
+                guard let content = String(data: reply.body, encoding: .utf8), content.contains("{") else {
                     return fail("profile-fail", "\(entry.name): empty or not json")
                 }
                 try await ShareLinkImport.save(name: entry.name, json: content, environments: environments)
@@ -225,14 +245,13 @@
                 return
             }
             do {
-                let request = try AgentAPI.request("build")
-                let (data, response) = try await AgentAPI.session().data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    let message = "build info http \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                let reply = try await AgentAPI.send("build")
+                guard reply.status == 200 else {
+                    let message = "build info http \(reply.status)"
                     if userInitiated { fail("build-fail", message) } else { DiagnosticsLog.log("app", "build-fail", message) }
                     return
                 }
-                buildInfo = try JSONDecoder().decode(AgentBuildInfo.self, from: data)
+                buildInfo = try JSONDecoder().decode(AgentBuildInfo.self, from: reply.body)
                 DiagnosticsLog.log("app", "build-info", buildInfo?.version ?? "?")
                 if userInitiated {
                     let installed = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -256,14 +275,13 @@
             defer { busy = false }
             DiagnosticsLog.log("app", "download-build", info.version ?? "?")
             do {
-                let request = try AgentAPI.request("build-file")
-                let (tmpURL, response) = try await AgentAPI.session().download(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    return fail("download-fail", "download http \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                let reply = try await AgentAPI.send("build-file")
+                guard reply.status == 200 else {
+                    return fail("download-fail", "download http \(reply.status)")
                 }
                 let dest = FileManager.default.temporaryDirectory.appendingPathComponent(file)
                 try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: tmpURL, to: dest)
+                try reply.body.write(to: dest)
                 downloadedFile = dest
                 showShare = true
                 ok("build-downloaded", "Downloaded \(file). Share the file into ESign.")
@@ -272,7 +290,20 @@
             }
         }
 
-        private func saveServerQuiet() {
+        func appBinding(_ id: String) -> Binding<Bool> {
+            Binding(
+                get: { self.splitApps.contains(id) },
+                set: { on in
+                    if on {
+                        if !self.splitApps.contains(id) { self.splitApps.append(id) }
+                    } else {
+                        self.splitApps.removeAll { $0 == id }
+                    }
+                }
+            )
+        }
+
+        private func persistServer() {
             AgentSettings.baseURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
             AgentSettings.apiToken = serverToken.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -284,6 +315,12 @@
             AgentSettings.proxyPort = Int(proxyPort) ?? 1080
             AgentSettings.proxyUser = proxyUser.trimmingCharacters(in: .whitespacesAndNewlines)
             AgentSettings.proxyPassword = proxyPassword
+        }
+
+        private func persistSplit() {
+            AgentSettings.splitMode = splitMode
+            AgentSettings.splitApps = splitApps
+            AgentSettings.splitExtra = splitExtra
         }
     }
 
@@ -309,42 +346,52 @@
 
         public var body: some View {
             FormView {
-                Section("Agent server") {
+                if !viewModel.status.isEmpty {
+                    Section {
+                        Text(viewModel.status)
+                            .font(.footnote)
+                    }
+                }
+                Section {
                     TextField("http://host/ipa-api.php", text: $viewModel.serverURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    SecureField("token", text: $viewModel.serverToken)
+                    SecureField("Token", text: $viewModel.serverToken)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     FormButton {
                         viewModel.saveServer()
                     } label: {
-                        Label("Save server", systemImage: "square.and.arrow.down")
+                        Label("Save", systemImage: "square.and.arrow.down")
                     }
                     FormButton {
                         Task { await viewModel.testServer() }
                     } label: {
-                        Label("Test server", systemImage: "checkmark.circle")
+                        Label("Test connection", systemImage: "checkmark.circle")
                     }
                     .disabled(viewModel.busy)
+                } header: {
+                    Text("1. Server")
+                } footer: {
+                    Text("Plain HTTP is allowed. Test does not use Apple’s URLSession, so ATS will not block it.")
                 }
-                Section("Proxy") {
-                    Toggle("Use proxy for agent", isOn: $viewModel.proxyEnabled)
+                Section {
+                    Toggle("Use proxy for Test and reports", isOn: $viewModel.proxyEnabled)
                     Picker("Type", selection: $viewModel.proxyType) {
                         Text("SOCKS5").tag("socks5")
                         Text("HTTP").tag("http")
                     }
-                    TextField("host", text: $viewModel.proxyHost)
+                    TextField("Host", text: $viewModel.proxyHost)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    TextField("port", text: $viewModel.proxyPort)
+                    TextField("Port", text: $viewModel.proxyPort)
                         .keyboardType(.numberPad)
-                    TextField("username", text: $viewModel.proxyUser)
+                    TextField("Username", text: $viewModel.proxyUser)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    SecureField("password", text: $viewModel.proxyPassword)
-                    TextField("profile name", text: $viewModel.proxyName)
+                    SecureField("Password", text: $viewModel.proxyPassword)
+                    TextField("Profile name", text: $viewModel.proxyName)
                         .textInputAutocapitalization(.never)
                     FormButton {
                         viewModel.saveProxy()
@@ -360,12 +407,45 @@
                     FormButton {
                         Task { await viewModel.importProxy(environments: environments) }
                     } label: {
-                        Label("Import proxy as profile", systemImage: "plus.circle")
+                        Label("Make a tunnel profile", systemImage: "plus.circle")
                     }
                     .disabled(viewModel.busy)
+                } header: {
+                    Text("2. Proxy")
+                } footer: {
+                    Text("Ping now does a real SOCKS/HTTP login. “Make a tunnel profile” puts this proxy on the Dashboard so apps can use it. Then start that profile instead of the old one.")
+                }
+                Section {
+                    Picker("Mode", selection: $viewModel.splitMode) {
+                        Text("All").tag("all")
+                        Text("Only listed").tag("whitelist")
+                        Text("All except listed").tag("blacklist")
+                    }
+                    .pickerStyle(.segmented)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 8)], spacing: 8) {
+                        ForEach(SplitTunnel.apps) { app in
+                            Toggle(app.title, isOn: viewModel.appBinding(app.id))
+                                .toggleStyle(.button)
+                                .font(.subheadline)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    TextField("Extra domains, comma separated", text: $viewModel.splitExtra)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    FormButton {
+                        Task { await viewModel.applySplit(environments: environments) }
+                    } label: {
+                        Label("Apply to current profile", systemImage: "arrow.triangle.branch")
+                    }
+                    .disabled(viewModel.busy)
+                } header: {
+                    Text("3. Split tunnel")
+                } footer: {
+                    Text("iPhone cannot attach other App Store apps to a personal VPN. These buttons match each app’s sites and IPs. All = everything through the tunnel. Only listed = those apps through the tunnel. All except listed = those apps go direct. Apply, then stop and start the tunnel.")
                 }
                 Section("Share link") {
-                    TextField("vless://...", text: $viewModel.shareLink)
+                    TextField("vless://…", text: $viewModel.shareLink)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     FormButton {
@@ -445,12 +525,6 @@
                         Label("Check for build", systemImage: "arrow.triangle.2.circlepath")
                     }
                     .disabled(viewModel.busy)
-                }
-                if !viewModel.status.isEmpty {
-                    Section {
-                        Text(viewModel.status)
-                            .font(.footnote)
-                    }
                 }
             }
             .navigationTitle("Agent")

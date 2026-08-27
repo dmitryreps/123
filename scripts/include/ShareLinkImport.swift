@@ -4,13 +4,14 @@ import Library
 
 enum ShareLinkImport {
     static func save(name: String, json: String, environments: ExtensionEnvironments) async throws {
+        let patched = try SplitTunnel.apply(json)
         var error: NSError?
-        LibboxCheckConfig(json, &error)
+        LibboxCheckConfig(patched, &error)
         if let error {
             throw error
         }
         if let existing = try await ProfileManager.get(by: name) {
-            try await existing.writeAsync(json)
+            try await existing.writeAsync(patched)
             existing.lastUpdated = Date()
             try await ProfileManager.update(existing)
         } else {
@@ -20,7 +21,7 @@ enum ShareLinkImport {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let profile = Profile(name: name, type: .local, path: path, lastUpdated: Date())
             try await ProfileManager.create(profile)
-            try await profile.writeAsync(json)
+            try await profile.writeAsync(patched)
         }
         await MainActor.run {
             environments.postReload()

@@ -1,8 +1,5 @@
 import Foundation
 import Network
-#if canImport(CFNetwork)
-    import CFNetwork
-#endif
 
 public enum AgentSettings {
     private static var store: UserDefaults {
@@ -52,6 +49,21 @@ public enum AgentSettings {
         set { store.set(newValue, forKey: "agent.proxyPassword") }
     }
 
+    public static var splitMode: String {
+        get { store.string(forKey: "agent.splitMode") ?? "all" }
+        set { store.set(newValue, forKey: "agent.splitMode") }
+    }
+
+    public static var splitApps: [String] {
+        get { store.stringArray(forKey: "agent.splitApps") ?? [] }
+        set { store.set(newValue, forKey: "agent.splitApps") }
+    }
+
+    public static var splitExtra: String {
+        get { store.string(forKey: "agent.splitExtra") ?? "" }
+        set { store.set(newValue, forKey: "agent.splitExtra") }
+    }
+
     public static var configured: Bool {
         let url = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,20 +73,14 @@ public enum AgentSettings {
     public static var proxyConfigured: Bool {
         !proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && proxyPort > 0
     }
+
+    public static var serverHost: String {
+        URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines))?.host ?? ""
+    }
 }
 
 public enum AgentAPI {
     public static var configured: Bool { AgentSettings.configured }
-
-    public static func session() -> URLSession {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 30
-        if AgentSettings.proxyEnabled, AgentSettings.proxyConfigured {
-            config.connectionProxyDictionary = proxyDictionary()
-        }
-        return URLSession(configuration: config)
-    }
 
     public static func request(_ action: String, query: [String: String] = [:], method: String = "GET", body: Data? = nil) throws -> URLRequest {
         let base = AgentSettings.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -96,12 +102,20 @@ public enum AgentAPI {
         return request
     }
 
+    public static func send(_ action: String, query: [String: String] = [:], method: String = "GET", body: Data? = nil) async throws -> AgentHTTP.Reply {
+        try await AgentHTTP.perform(try request(action, query: query, method: method, body: body))
+    }
+
     public static func tcpPing(host: String, port: Int) async throws -> Int {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             throw NSError(domain: "AgentAPI", code: -3, userInfo: [NSLocalizedDescriptionKey: "bad port"])
         }
         return try await withCheckedThrowingContinuation { continuation in
-            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+            let tcp = NWProtocolTCP.Options()
+            tcp.connectionTimeout = 8
+            let params = NWParameters(tls: nil, tcp: tcp)
+            params.preferNoProxies = true
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
             let started = Date()
             var finished = false
             func finish(_ result: Result<Int, Error>) {
@@ -125,38 +139,5 @@ public enum AgentAPI {
                 finish(.failure(NSError(domain: "AgentAPI", code: -4, userInfo: [NSLocalizedDescriptionKey: "ping timeout"])))
             }
         }
-    }
-
-    private static func proxyDictionary() -> [AnyHashable: Any] {
-        let host = AgentSettings.proxyHost
-        let port = AgentSettings.proxyPort
-        let user = AgentSettings.proxyUser
-        let password = AgentSettings.proxyPassword
-        if AgentSettings.proxyType == "http" {
-            // HTTPS* CFNetwork constants are macOS-only; iOS still honors the string keys.
-            var dict: [AnyHashable: Any] = [
-                kCFNetworkProxiesHTTPEnable: true,
-                kCFNetworkProxiesHTTPProxy: host,
-                kCFNetworkProxiesHTTPPort: port,
-                "HTTPSEnable": true,
-                "HTTPSProxy": host,
-                "HTTPSPort": port,
-            ]
-            if !user.isEmpty {
-                dict[kCFProxyUsernameKey] = user
-                dict[kCFProxyPasswordKey] = password
-            }
-            return dict
-        }
-        var dict: [AnyHashable: Any] = [
-            kCFStreamPropertySOCKSProxyHost: host,
-            kCFStreamPropertySOCKSProxyPort: port,
-            kCFStreamPropertySOCKSVersion: kCFStreamSocketSOCKSVersion5,
-        ]
-        if !user.isEmpty {
-            dict[kCFStreamPropertySOCKSUser] = user
-            dict[kCFStreamPropertySOCKSPassword] = password
-        }
-        return dict
     }
 }
