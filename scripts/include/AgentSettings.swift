@@ -133,13 +133,14 @@ public enum AgentAPI {
         let user = AgentSettings.proxyUser
         let password = AgentSettings.proxyPassword
         if AgentSettings.proxyType == "http" {
+            // HTTPS* CFNetwork constants are macOS-only; iOS still honors the string keys.
             var dict: [AnyHashable: Any] = [
                 kCFNetworkProxiesHTTPEnable: true,
                 kCFNetworkProxiesHTTPProxy: host,
                 kCFNetworkProxiesHTTPPort: port,
-                kCFNetworkProxiesHTTPSEnable: true,
-                kCFNetworkProxiesHTTPSProxy: host,
-                kCFNetworkProxiesHTTPSPort: port,
+                "HTTPSEnable": true,
+                "HTTPSProxy": host,
+                "HTTPSPort": port,
             ]
             if !user.isEmpty {
                 dict[kCFProxyUsernameKey] = user
