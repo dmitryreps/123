@@ -22,6 +22,12 @@ jobs:
           git clone --depth 1 --branch dev --recurse-submodules \
             https://github.com/SagerNet/sing-box-for-apple.git sing-box-for-apple
 
+      - name: Patch sideload identifiers
+        env:
+          SIDELOAD_BUNDLE_ID: app.bronze6658.lychee6856
+          SIDELOAD_APP_GROUP: group.a05b266105020512.1
+        run: python3 scripts/patch-sideload.py
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -70,6 +76,8 @@ jobs:
         working-directory: sing-box-for-apple
         env:
           DISABLE_SWIFTLINT: "1"
+          SIDELOAD_BUNDLE_ID: app.bronze6658.lychee6856
+          SIDELOAD_APP_GROUP: group.a05b266105020512.1
         run: |
           set -euo pipefail
           xcodebuild \
@@ -83,6 +91,9 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
+            BASE_PACKAGE_IDENTIFIER="$SIDELOAD_BUNDLE_ID" \
+            APP_GROUP_IDENTIFIER="$SIDELOAD_APP_GROUP" \
+            PRODUCT_BUNDLE_IDENTIFIER="$SIDELOAD_BUNDLE_ID" \
             build
 
       - name: Package IPA
@@ -96,7 +107,13 @@ jobs:
             exit 1
           fi
           echo "APP=$APP"
+          if [ -d "$APP/PlugIns" ]; then
+            find "$APP/PlugIns" -mindepth 1 -maxdepth 1 ! -name "Extension.appex" -exec rm -rf {} +
+          fi
+          rm -rf "$APP/Extensions"
+          echo "PLUGINS_AFTER"
           find "$APP" -name "*.appex" -print
+          test -d "$APP/PlugIns/Extension.appex"
           rm -rf "$RUNNER_TEMP/ipa"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           ditto "$APP" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP")"
