@@ -32,6 +32,7 @@
         @Published var downloadedFile: URL?
         @Published var showShare = false
         @Published var showQR = false
+        @Published var showAddProxy = false
         @Published var shareLink = ""
         @Published var alert: AlertState?
 
@@ -125,6 +126,20 @@
             } catch {
                 fail("proxy-import-error", error.localizedDescription)
             }
+        }
+
+        func saveAddedProxy(host: String, port: String, login: String, password: String, type: String, environments: ExtensionEnvironments) async {
+            proxyHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            proxyPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+            proxyUser = login.trimmingCharacters(in: .whitespacesAndNewlines)
+            proxyPassword = password
+            proxyType = type
+            let trimmedName = proxyName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedName.isEmpty || trimmedName == "proxy-1" {
+                proxyName = proxyHost.isEmpty ? "proxy-1" : proxyHost
+            }
+            DiagnosticsLog.log("app", "add-proxy-save")
+            await importProxy(environments: environments)
         }
 
         func applySplit(environments: ExtensionEnvironments) async {
@@ -442,6 +457,117 @@
         func updateUIViewController(_: UIActivityViewController, context _: Context) {}
     }
 
+    struct TelegramLineField: View {
+        let title: String
+        @Binding var text: String
+        var keyboard: UIKeyboardType = .default
+        var isSecure = false
+        @FocusState private var focused: Bool
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.subheadline)
+                    .foregroundStyle(focused ? Color.accentColor : Color.secondary)
+                Group {
+                    if isSecure {
+                        SecureField("", text: $text)
+                    } else {
+                        TextField("", text: $text)
+                            .keyboardType(keyboard)
+                    }
+                }
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($focused)
+                Rectangle()
+                    .fill(focused ? Color.accentColor : Color.secondary.opacity(0.45))
+                    .frame(height: focused ? 2 : 1)
+            }
+        }
+    }
+
+    struct AddProxySheet: View {
+        @Environment(\.dismiss) private var dismiss
+        @State private var host: String
+        @State private var port: String
+        @State private var login: String
+        @State private var password: String
+        @State private var type: String
+        let onSave: (String, String, String, String, String) -> Void
+
+        init(host: String, port: String, login: String, password: String, type: String, onSave: @escaping (String, String, String, String, String) -> Void) {
+            _host = State(initialValue: host)
+            _port = State(initialValue: port.isEmpty ? "1080" : port)
+            _login = State(initialValue: login)
+            _password = State(initialValue: password)
+            _type = State(initialValue: type.isEmpty ? "socks5" : type)
+            self.onSave = onSave
+        }
+
+        private var canSave: Bool {
+            !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (Int(port) ?? 0) > 0
+        }
+
+        var body: some View {
+            NavigationView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Picker("Type", selection: $type) {
+                        Text("SOCKS5").tag("socks5")
+                        Text("HTTP").tag("http")
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+
+                    Text("Адрес сокета")
+                        .font(.headline)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 22)
+                    HStack(alignment: .bottom, spacing: 20) {
+                        TelegramLineField(title: "Хост", text: $host)
+                        TelegramLineField(title: "Порт", text: $port, keyboard: .numberPad)
+                            .frame(width: 88)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+
+                    Text("Учётные данные (необязательно)")
+                        .font(.headline)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 28)
+                    TelegramLineField(title: "Логин", text: $login)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                    TelegramLineField(title: "Пароль", text: $password, isSecure: true)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 16)
+
+                    Spacer()
+
+                    HStack {
+                        Spacer()
+                        Button("Отмена") { dismiss() }
+                            .font(.body.weight(.medium))
+                        Button("Сохранить") {
+                            onSave(host, port, login, password, type)
+                            dismiss()
+                        }
+                        .font(.body.weight(.semibold))
+                        .disabled(!canSave)
+                        .padding(.leading, 20)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                    .padding(.top, 8)
+                }
+                .navigationTitle("Добавить прокси")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+            .navigationViewStyle(.stack)
+        }
+    }
+
     public struct AgentCenterView: View {
         @EnvironmentObject private var environments: ExtensionEnvironments
         @StateObject private var viewModel = AgentCenterViewModel()
@@ -489,6 +615,18 @@
                     Text("Auto setup")
                 } footer: {
                     Text("Picks routing, keeps this app’s server off the proxy, writes it to the Dashboard profile, then tests the server. Restart the tunnel after it finishes.")
+                }
+                Section {
+                    FormButton {
+                        viewModel.showAddProxy = true
+                    } label: {
+                        Label("Добавить прокси", systemImage: "plus")
+                    }
+                    .disabled(viewModel.busy)
+                } header: {
+                    Text("Добавить прокси")
+                } footer: {
+                    Text("Host, port and optional login, like Telegram. Saves a Dashboard profile. SOCKS5 by default.")
                 }
                 Section {
                     Picker("Mode", selection: $viewModel.splitMode) {
@@ -677,6 +815,26 @@
             }
             .navigationTitle("Agent")
             .alert($viewModel.alert)
+            .sheet(isPresented: $viewModel.showAddProxy) {
+                AddProxySheet(
+                    host: viewModel.proxyHost,
+                    port: viewModel.proxyPort,
+                    login: viewModel.proxyUser,
+                    password: viewModel.proxyPassword,
+                    type: viewModel.proxyType
+                ) { host, port, login, password, type in
+                    Task {
+                        await viewModel.saveAddedProxy(
+                            host: host,
+                            port: port,
+                            login: login,
+                            password: password,
+                            type: type,
+                            environments: environments
+                        )
+                    }
+                }
+            }
             .sheet(isPresented: $viewModel.showQR) {
                 QRScannerView { result in
                     viewModel.showQR = false
