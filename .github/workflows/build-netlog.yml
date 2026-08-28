@@ -1,0 +1,70 @@
+# Unsigned Netlog IPA. Actions → Build unsigned netlog → Run workflow.
+name: Build unsigned netlog
+
+on:
+  workflow_dispatch:
+
+jobs:
+  netlog:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          echo "RUNNER=macos-15"
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build unsigned
+        working-directory: filter
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Netlog.xcodeproj \
+            -scheme Netlog \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" \
+            -maxdepth 1 -type d -name "Netlog.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "Netlog.app not found"
+            find "$RUNNER_TEMP/DerivedData" -name "*.app" | head -20
+            exit 1
+          fi
+          echo "APP=$APP"
+          echo "PLUGINS"
+          find "$APP/PlugIns" -maxdepth 2 -print || true
+          test -d "$APP/PlugIns/FilterData.appex"
+          test -d "$APP/PlugIns/FilterControl.appex"
+          rm -rf "$RUNNER_TEMP/ipa"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/Netlog.app"
+          (
+            cd "$RUNNER_TEMP/ipa"
+            zip -qry "$GITHUB_WORKSPACE/Netlog-unsigned.ipa" Payload
+          )
+          ls -lh "$GITHUB_WORKSPACE/Netlog-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Netlog-unsigned
+          path: Netlog-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

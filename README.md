@@ -35,4 +35,12 @@ Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobil
 4. Sign in ESign the same way. There is no `.appex`. You may change the bundle ID.
 5. In the app: paste server URL + token → tap a method → Copy the popup.
 
+## Netlog test app
+
+1. **Actions** → **Build unsigned netlog** → **Run workflow**
+2. Wait about 5 minutes (`macos-15`)
+3. Download artifact `Netlog-unsigned`
+4. Sign in ESign. Keep both `.appex` files. Use a **new** bundle ID — do not reuse the main SFI app ID.
+5. Open Netlog → **Start watch**. Leave the app. Open other apps. Come back and tap **Copy**.
+
 Do not commit `.p12`, passwords, or live configs.
