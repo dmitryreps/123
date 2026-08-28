@@ -40,9 +40,9 @@ public enum AgentHTTP {
         var lastError: Error = AgentHTTPError.timeout
         let tls = request.url?.scheme?.lowercased() == "https"
         let steps: [(name: String, posix: Bool, prohibitOther: Bool)] = [
-            ("nw", false, true),
             ("posix", true, false),
             ("nw-any", false, false),
+            ("nw", false, true),
         ]
         for step in steps {
             if step.posix, tls {
@@ -56,7 +56,8 @@ public enum AgentHTTP {
                     reply = try await performPOSIX(request)
                 } else {
                     let useProxy = step.name == "nw" && AgentSettings.proxyEnabled && AgentSettings.proxyConfigured
-                    reply = try await performNW(request, prohibitOther: step.prohibitOther, useProxy: useProxy)
+                    let timeout: TimeInterval = step.prohibitOther ? 4 : 8
+                    reply = try await performNW(request, prohibitOther: step.prohibitOther, useProxy: useProxy, timeout: timeout)
                 }
                 reply.via = step.name
                 DiagnosticsLog.log("app", "http-via", step.name)
@@ -88,7 +89,7 @@ public enum AgentHTTP {
         return true
     }
 
-    private static func performNW(_ request: URLRequest, prohibitOther: Bool, useProxy: Bool) async throws -> Reply {
+    private static func performNW(_ request: URLRequest, prohibitOther: Bool, useProxy: Bool, timeout: TimeInterval = 8) async throws -> Reply {
         guard let url = request.url, let host = url.host, !host.isEmpty else {
             throw AgentHTTPError.badURL
         }
@@ -114,9 +115,9 @@ public enum AgentHTTP {
 
         let connection: NWConnection
         if useProxy {
-            connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: prohibitOther)
+            connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: prohibitOther, timeout: timeout)
         } else {
-            connection = try await connect(host: host, port: port, tls: tls, prohibitOther: prohibitOther)
+            connection = try await connect(host: host, port: port, tls: tls, prohibitOther: prohibitOther, timeout: timeout)
         }
         defer { connection.cancel() }
         DiagnosticsLog.log("app", "http-connect", "ok")
@@ -263,7 +264,7 @@ public enum AgentHTTP {
             throw AgentHTTPError.proxy("Fill host and port first")
         }
         let started = Date()
-        let connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: true)
+        let connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: true, timeout: 8)
         defer { connection.cancel() }
         if AgentSettings.proxyType == "http" {
             try await httpConnect(connection, host: "1.1.1.1", port: 443)
@@ -286,10 +287,10 @@ public enum AgentHTTP {
         return "Basic \(Data(raw.utf8).base64EncodedString())"
     }
 
-    private static func connect(host: String, port: UInt16, tls: Bool, prohibitOther: Bool) async throws -> NWConnection {
+    private static func connect(host: String, port: UInt16, tls: Bool, prohibitOther: Bool, timeout: TimeInterval) async throws -> NWConnection {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw AgentHTTPError.badURL }
         let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = 15
+        tcp.connectionTimeout = Int(max(2, timeout))
         let params = tls
             ? NWParameters(tls: NWProtocolTLS.Options(), tcp: tcp)
             : NWParameters(tls: nil, tcp: tcp)
@@ -298,7 +299,7 @@ public enum AgentHTTP {
             params.prohibitedInterfaceTypes = [.other]
         }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
-        try await waitReady(connection, seconds: 15)
+        try await waitReady(connection, seconds: timeout)
         return connection
     }
 

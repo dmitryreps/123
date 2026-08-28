@@ -554,7 +554,7 @@
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("Same URL and token as before. Test and Send try a raw TCP client first, then a POSIX socket, then TCP again without the tunnel-interface ban.")
+                    Text("Same URL and token as before. Test and Send use a POSIX socket first, then TCP if that fails.")
                 }
                 Section {
                     Toggle("Show advanced", isOn: $showAdvanced)

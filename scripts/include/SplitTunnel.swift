@@ -85,6 +85,7 @@ public enum SplitTunnel {
         var route = config["route"] as? [String: Any] ?? [:]
         route["rules"] = buildRules(proxyTag: proxyTag)
         route["final"] = AgentSettings.splitMode == "whitelist" ? "direct" : proxyTag
+        route["default_domain_resolver"] = ["server": dnsResolverTag(config)]
         config["route"] = route
 
         let out = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
@@ -157,6 +158,14 @@ public enum SplitTunnel {
         return rules
     }
 
+    private static func dnsResolverTag(_ config: [String: Any]) -> String {
+        let servers = (config["dns"] as? [String: Any])?["servers"] as? [[String: Any]] ?? []
+        if servers.contains(where: { ($0["tag"] as? String) == "local" }) { return "local" }
+        if servers.contains(where: { ($0["tag"] as? String) == "dns-bootstrap" }) { return "dns-bootstrap" }
+        if let tag = servers.first?["tag"] as? String, !tag.isEmpty { return tag }
+        return "local"
+    }
+
     /// sing-box 1.12 deprecates `{ "address": "8.8.8.8" }`; 1.14 removes it.
     private static func migrateDNS(_ config: inout [String: Any], proxyTag: String) {
         var dns = config["dns"] as? [String: Any] ?? [:]
@@ -175,6 +184,9 @@ public enum SplitTunnel {
             ]
         }
         attachDomainResolver(&servers)
+        if !servers.contains(where: { ($0["tag"] as? String) == "local" }) {
+            servers.append(["type": "local", "tag": "local"])
+        }
         dns["servers"] = servers
         dns.removeValue(forKey: "independent_cache")
         if dns["strategy"] == nil {
