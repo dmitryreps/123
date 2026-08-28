@@ -8,6 +8,9 @@ struct ContentView: View {
     @State private var logText = ""
     @State private var dump: DumpItem?
     @State private var busy = false
+    @State private var appBundleID = Bundle.main.bundleIdentifier ?? "unknown.bundle"
+    @State private var dataBundleID = ""
+    @State private var controlBundleID = ""
 
     private let tick = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -17,6 +20,9 @@ struct ContentView: View {
                 Text(status)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                Text(bundleInfoText())
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
                 HStack {
                     Button("Start watch") { Task { await startWatch() } }
                         .buttonStyle(.borderedProminent)
@@ -35,10 +41,25 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-                Button("Install profile") { Task { await saveProfile() } }
+                HStack {
+                    Button("Install profile (app)") {
+                        Task { await saveProfile(pluginBundleID: appBundleID, label: "app") }
+                    }
                     .buttonStyle(.bordered)
                     .disabled(busy)
-                Text("If Start watch says permission denied, tap Install profile, install it in Settings, then tap Start watch again.")
+
+                    Button("Install profile (data)") {
+                        let fallback = dataBundleID.isEmpty ? appBundleID : dataBundleID
+                        Task { await saveProfile(pluginBundleID: fallback, label: "data") }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(busy)
+
+                    Button("Reload state") { Task { await loadState() } }
+                        .buttonStyle(.bordered)
+                        .disabled(busy)
+                }
+                Text("If Start watch says permission denied, install app-profile first. If still denied, install data-profile and retry.")
                 Text("Leave this screen. Open Telegram, Safari, YouTube. Come back — APP= is the bundle id. Traffic is allowed, not blocked.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -53,6 +74,7 @@ struct ContentView: View {
             .navigationTitle("Netlog")
             .onAppear {
                 refresh()
+                discoverExtensionBundleIDs()
                 Task { await loadState() }
             }
             .onReceive(tick) { _ in refresh() }
@@ -74,12 +96,43 @@ struct ContentView: View {
         logText = FlowLog.text()
     }
 
+    private func bundleInfoText() -> String {
+        let dataID = dataBundleID.isEmpty ? "-" : dataBundleID
+        let controlID = controlBundleID.isEmpty ? "-" : controlBundleID
+        return "APP=\(appBundleID)\nDATA=\(dataID)\nCTRL=\(controlID)"
+    }
+
+    private func discoverExtensionBundleIDs() {
+        guard let pluginsURL = Bundle.main.builtInPlugInsURL else { return }
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: pluginsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for url in urls where url.pathExtension == "appex" {
+            guard let bundle = Bundle(url: url) else { continue }
+            guard let bundleID = bundle.bundleIdentifier else { continue }
+            guard let ext = bundle.infoDictionary?["NSExtension"] as? [String: Any] else { continue }
+            guard let point = ext["NSExtensionPointIdentifier"] as? String else { continue }
+
+            if point == "com.apple.networkextension.filter-data" {
+                dataBundleID = bundleID
+            } else if point == "com.apple.networkextension.filter-control" {
+                controlBundleID = bundleID
+            }
+        }
+    }
+
     private func loadState() async {
         do {
-            try await NEFilterManager.shared().loadFromPreferences()
-            enabled = NEFilterManager.shared().isEnabled
+            let manager = NEFilterManager.shared()
+            try await manager.loadFromPreferences()
+            enabled = manager.isEnabled
+            let hasConfig = manager.providerConfiguration != nil
+            status = "prefs enabled=\(enabled ? "yes" : "no") has_config=\(hasConfig ? "yes" : "no")"
             if enabled {
-                status = "Watching in background. Open other apps, then look at APP= lines."
+                status += ". Watching in background. Open other apps, then look at APP= lines."
             }
         } catch {
             status = "Load failed: \(error.localizedDescription)"
@@ -90,12 +143,13 @@ struct ContentView: View {
         busy = true
         defer { busy = false }
         do {
-            try await NEFilterManager.shared().loadFromPreferences()
+            let manager = NEFilterManager.shared()
+            try await manager.loadFromPreferences()
             let config = NEFilterProviderConfiguration()
             config.filterSockets = true
+            config.filterBrowsers = true
             config.username = "Netlog"
             config.organization = "Netlog"
-            let manager = NEFilterManager.shared()
             manager.providerConfiguration = config
             manager.isEnabled = true
             try await manager.saveToPreferences()
@@ -106,14 +160,19 @@ struct ContentView: View {
         } catch {
             let ns = error as NSError
             status = "SAVE_FAIL domain=\(ns.domain) code=\(ns.code) \(ns.localizedDescription). Distribution/ESign often gets permission denied without supervised device + get-task-allow."
+            if ns.domain == NEFilterErrorDomain || ns.domain == "NEConfigurationErrorDomain" {
+                status += " Try Install profile (app), then Start watch; if still denied, try Install profile (data)."
+            }
             dump = DumpItem(title: "ERROR", text: status)
         }
     }
 
-    private func saveProfile() async {
+    private func saveProfile(pluginBundleID: String, label: String) async {
         busy = true
         defer { busy = false }
-        let uuid = UUID().uuidString
+        let payloadUUID = UUID().uuidString
+        let contentUUID = UUID().uuidString
+        let baseID = appBundleID.replacingOccurrences(of: " ", with: "-")
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -127,11 +186,11 @@ struct ContentView: View {
         			<key>PayloadVersion</key>
         			<integer>1</integer>
         			<key>PayloadIdentifier</key>
-        			<string>app.local.netlog.profile.\(uuid)</string>
+        			<string>\(baseID).profile.webcontent.\(label)</string>
         			<key>PayloadUUID</key>
-        			<string>\(uuid)</string>
+        			<string>\(payloadUUID)</string>
         			<key>PayloadDisplayName</key>
-        			<string>Netlog Filter</string>
+        			<string>Netlog Filter (\(label))</string>
         			<key>FilterType</key>
         			<string>Plugin</string>
         			<key>FilterSockets</key>
@@ -141,30 +200,37 @@ struct ContentView: View {
         			<key>UserDefinedName</key>
         			<string>Netlog</string>
         			<key>PluginBundleID</key>
-        			<string>app.local.netlog</string>
+        			<string>\(pluginBundleID)</string>
         			<key>ContentFilterUUID</key>
-        			<string>\(uuid)</string>
+        			<string>\(contentUUID)</string>
         		</dict>
         	</array>
         	<key>PayloadDisplayName</key>
-        	<string>Netlog Filter</string>
+        	<string>Netlog Filter Profile (\(label))</string>
         	<key>PayloadIdentifier</key>
-        	<string>app.local.netlog.profile</string>
+        	<string>\(baseID).profile.\(label)</string>
         	<key>PayloadType</key>
         	<string>Configuration</string>
         	<key>PayloadUUID</key>
-        	<string>\(uuid)</string>
+        	<string>\(UUID().uuidString)</string>
         	<key>PayloadVersion</key>
         	<integer>1</integer>
         </dict>
         </plist>
         """
-        let dir = FileManager.default.temporaryDirectory
-        let file = dir.appendingPathComponent("Netlog.mobileconfig")
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let file = dir.appendingPathComponent("Netlog-\(label).mobileconfig")
         do {
             try plist.write(to: file, atomically: true, encoding: .utf8)
-            status = "Profile saved. Opening Settings… install it, then come back and tap Start watch."
-            await UIApplication.shared.open(file)
+            FlowLog.appendSystem("profile-saved label=\(label) plugin=\(pluginBundleID)")
+            let opened = await UIApplication.shared.open(file)
+            if opened {
+                status = "Profile saved (\(file.lastPathComponent)). Install it in Settings, then tap Start watch."
+            } else {
+                UIPasteboard.general.string = plist
+                status = "Profile saved to \(file.lastPathComponent). Open Files and install. XML copied to clipboard."
+            }
         } catch {
             status = "Profile save failed: \(error.localizedDescription)"
         }
