@@ -89,7 +89,6 @@ struct ContentView: View {
             try await NEFilterManager.shared().loadFromPreferences()
             let config = NEFilterProviderConfiguration()
             config.filterSockets = true
-            config.filterPackets = false
             config.username = "Netlog"
             config.organization = "Netlog"
             let manager = NEFilterManager.shared()
