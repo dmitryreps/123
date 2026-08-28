@@ -57,8 +57,10 @@ enum ProbeTransport {
         log.line("STACK", kind.stack)
         log.line("ACTION", kind.action)
         log.line("HTTP_METHOD", kind.httpMethod)
-        log.line("IOS", UIDevice.current.systemVersion)
-        log.line("DEVICE", UIDevice.current.model)
+        let iosVersion = await MainActor.run { UIDevice.current.systemVersion }
+        let deviceModel = await MainActor.run { UIDevice.current.model }
+        log.line("IOS", iosVersion)
+        log.line("DEVICE", deviceModel)
         log.line("TOKEN_SET", token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "no" : "yes")
         log.line("TOKEN_LEN", "\(token.trimmingCharacters(in: .whitespacesAndNewlines).count)")
         log.atsFromBundle()
@@ -85,7 +87,7 @@ enum ProbeTransport {
                 "method": kind.rawValue,
                 "via": kind.rawValue,
                 "ts": ISO8601DateFormatter().string(from: Date()),
-                "ios": UIDevice.current.systemVersion,
+                "ios": iosVersion,
                 "note": "probe-app",
             ] as [String: Any]
             body = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data("{}".utf8)
@@ -329,7 +331,7 @@ enum ProbeTransport {
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var finished = false
-            func finish(_ result: Result<Void, Error>) {
+            @Sendable func finish(_ result: Result<Void, Error>) {
                 guard !finished else { return }
                 finished = true
                 continuation.resume(with: result)
@@ -483,7 +485,7 @@ enum ProbeTransport {
 
     private static func readAll(fd: Int32, limit: Int, timeoutMs: Int32) throws -> Data {
         var data = Data()
-        var tv = timeval(tv_sec: timeoutMs / 1000, tv_usec: (timeoutMs % 1000) * 1000)
+        var tv = timeval(tv_sec: Int(timeoutMs / 1000), tv_usec: Int32((timeoutMs % 1000) * 1000))
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var buf = [UInt8](repeating: 0, count: 16 * 1024)
         while data.count < limit {
@@ -602,7 +604,7 @@ private struct DumpLog {
             case let .posix(code):
                 line("NW_POSIX", "\(code.rawValue) \(String(cString: strerror(code.rawValue)))")
             case let .dns(code):
-                line("NW_DNS", "\(code.rawValue)")
+                line("NW_DNS", "\(code)")
             case let .tls(code):
                 line("NW_TLS", "\(code)")
             @unknown default:
