@@ -3,6 +3,12 @@ name: Build unsigned netlog
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "filter/**"
+      - ".github/workflows/build-netlog.yml"
 
 jobs:
   netlog:
