@@ -41,6 +41,7 @@ public enum AgentHTTP {
             headers["Host"] = (port == 80 && !tls) || (port == 443 && tls) ? host : "\(host):\(port)"
         }
         headers["Connection"] = "close"
+        headers["Accept-Encoding"] = "identity"
         if body.isEmpty {
             headers.removeValue(forKey: "Content-Length")
         } else {
@@ -79,7 +80,7 @@ public enum AgentHTTP {
             path = urlRequestPath(url)
         }
 
-        var packet = "\(method) \(path) HTTP/1.1\r\n"
+        var packet = "\(method) \(path) HTTP/1.0\r\n"
         for (key, value) in headers {
             packet += "\(key): \(value)\r\n"
         }
@@ -131,6 +132,7 @@ public enum AgentHTTP {
             ? NWParameters(tls: NWProtocolTLS.Options(), tcp: tcp)
             : NWParameters(tls: nil, tcp: tcp)
         params.preferNoProxies = true
+        params.prohibitedInterfaceTypes = [.other]
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         try await waitReady(connection)
         return connection
@@ -205,6 +207,23 @@ public enum AgentHTTP {
         return data
     }
 
+    private static func isStreamEOF(_ error: Error) -> Bool {
+        if case AgentHTTPError.closed = error { return true }
+        if let nw = error as? NWError, case let .posix(code) = nw {
+            switch code {
+            case .ENODATA, .ECONNRESET, .ENOTCONN, .EPIPE, .ETIMEDOUT:
+                return true
+            default:
+                break
+            }
+        }
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain && [54, 57, 60, 96].contains(ns.code) {
+            return true
+        }
+        return false
+    }
+
     private static func receiveAll(_ connection: NWConnection, limit: Int) async throws -> Data {
         var data = Data()
         while data.count < limit {
@@ -212,12 +231,31 @@ public enum AgentHTTP {
                 let chunk = try await receiveSome(connection, min: 1, max: min(64 * 1024, limit - data.count))
                 if chunk.isEmpty { break }
                 data.append(chunk)
-            } catch AgentHTTPError.closed {
-                break
+                if looksCompleteHTTP(data) { break }
+            } catch {
+                if isStreamEOF(error) { break }
+                DiagnosticsLog.log("app", "http-recv-error", "bytes=\(data.count) \(error.localizedDescription)")
+                throw error
             }
         }
         DiagnosticsLog.log("app", "http-recv", "bytes=\(data.count)")
         return data
+    }
+
+    private static func looksCompleteHTTP(_ raw: Data) -> Bool {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let range = raw.range(of: separator) else { return false }
+        let head = String(data: raw.subdata(in: raw.startIndex ..< range.lowerBound), encoding: .utf8) ?? ""
+        let body = raw.subdata(in: range.upperBound ..< raw.endIndex)
+        let lower = head.lowercased()
+        if lower.contains("transfer-encoding: chunked") {
+            return body.range(of: Data("0\r\n\r\n".utf8)) != nil || body.range(of: Data("0\n\n".utf8)) != nil
+        }
+        if let line = lower.split(separator: "\r\n").first(where: { $0.hasPrefix("content-length:") }) {
+            let n = Int(line.split(separator: ":").last?.trimmingCharacters(in: .whitespaces) ?? "") ?? -1
+            return n >= 0 && body.count >= n
+        }
+        return !body.isEmpty
     }
 
     private static func parseHTTP(_ raw: Data) throws -> Reply {
@@ -226,11 +264,40 @@ public enum AgentHTTP {
             throw AgentHTTPError.http("Incomplete HTTP reply")
         }
         let head = String(data: raw.subdata(in: raw.startIndex ..< range.lowerBound), encoding: .utf8) ?? ""
-        let body = raw.subdata(in: range.upperBound ..< raw.endIndex)
         let first = head.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
         let parts = first.split(separator: " ")
         let status = parts.count >= 2 ? Int(parts[1]) ?? 0 : 0
+        var body = raw.subdata(in: range.upperBound ..< raw.endIndex)
+        if head.lowercased().contains("transfer-encoding: chunked") {
+            body = dechunk(body) ?? body
+        }
         return Reply(status: status, body: body)
+    }
+
+    private static func dechunk(_ data: Data) -> Data? {
+        var index = data.startIndex
+        var out = Data()
+        let crlf = Data("\r\n".utf8)
+        let lf = Data("\n".utf8)
+        while index < data.endIndex {
+            let rest = data[index...]
+            guard let lineEnd = rest.range(of: crlf) ?? rest.range(of: lf) else { return nil }
+            let line = String(data: data[index ..< lineEnd.lowerBound], encoding: .utf8) ?? ""
+            let hex = line.split(separator: ";").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let size = Int(hex, radix: 16) else { return nil }
+            index = lineEnd.upperBound
+            if size == 0 { return out }
+            guard let end = data.index(index, offsetBy: size, limitedBy: data.endIndex) else { return nil }
+            out.append(data[index ..< end])
+            index = end
+            if index < data.endIndex, data[index] == 13 {
+                index = data.index(after: index)
+            }
+            if index < data.endIndex, data[index] == 10 {
+                index = data.index(after: index)
+            }
+        }
+        return out
     }
 
     private static func socks5Connect(_ connection: NWConnection, host: String, port: UInt16) async throws {

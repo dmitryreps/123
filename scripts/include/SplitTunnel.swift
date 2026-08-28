@@ -74,11 +74,7 @@ public enum SplitTunnel {
         let proxyTag = firstProxyTag(config)
         var inbounds = config["inbounds"] as? [[String: Any]] ?? []
         for index in inbounds.indices where inbounds[index]["type"] as? String == "tun" {
-            var exclude = inbounds[index]["route_exclude_address"] as? [String] ?? []
-            let host = AgentSettings.serverHost
-            if !host.isEmpty, ipv4(host), !exclude.contains("\(host)/32") {
-                exclude.append("\(host)/32")
-            }
+            let exclude = unique((inbounds[index]["route_exclude_address"] as? [String] ?? []) + tunExcludeCIDRs())
             if !exclude.isEmpty {
                 inbounds[index]["route_exclude_address"] = exclude
             }
@@ -143,15 +139,50 @@ public enum SplitTunnel {
             if !cidrs.isEmpty {
                 rules.append(["ip_cidr": cidrs, "outbound": proxyTag])
             }
-        } else if mode == "blacklist" {
-            if !domains.isEmpty {
-                rules.append(["domain_suffix": domains, "outbound": "direct"])
+        } else if mode == "blacklist" || mode == "smart" {
+            var directDomains = domains
+            var directCidrs = cidrs
+            if mode == "smart" {
+                if let apple = apps.first(where: { $0.id == "apple" }) {
+                    directDomains.append(contentsOf: apple.domains)
+                    directCidrs.append(contentsOf: apple.cidrs)
+                }
+                directDomains.append(contentsOf: [
+                    "captive.apple.com",
+                    "push.apple.com",
+                    "gateway.icloud.com",
+                ])
             }
-            if !cidrs.isEmpty {
-                rules.append(["ip_cidr": cidrs, "outbound": "direct"])
+            directDomains = unique(directDomains)
+            directCidrs = unique(directCidrs)
+            if !directDomains.isEmpty {
+                rules.append(["domain_suffix": directDomains, "outbound": "direct"])
+            }
+            if !directCidrs.isEmpty {
+                rules.append(["ip_cidr": directCidrs, "outbound": "direct"])
             }
         }
         return rules
+    }
+
+    /// Destinations that skip the tunnel at the kernel (physical interface).
+    /// Stronger than a sing-box “direct” rule: packets never enter the extension.
+    private static func tunExcludeCIDRs() -> [String] {
+        var cidrs = [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+        ]
+        if let host = optionalIPv4(AgentSettings.serverHost) {
+            cidrs.append("\(host)/32")
+        }
+        let mode = AgentSettings.splitMode
+        let appleOffTunnel = mode == "smart" || (mode == "blacklist" && AgentSettings.splitApps.contains("apple"))
+        if appleOffTunnel {
+            cidrs.append("17.0.0.0/8")
+        }
+        return cidrs
     }
 
     private static func extraDomains() -> [String] {
@@ -165,10 +196,6 @@ public enum SplitTunnel {
     private static func unique(_ values: [String]) -> [String] {
         var seen = Set<String>()
         return values.filter { seen.insert($0).inserted }
-    }
-
-    private static func ipv4(_ host: String) -> Bool {
-        optionalIPv4(host) != nil
     }
 
     private static func optionalIPv4(_ host: String?) -> String? {

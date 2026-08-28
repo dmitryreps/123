@@ -322,6 +322,110 @@
             AgentSettings.splitApps = splitApps
             AgentSettings.splitExtra = splitExtra
         }
+
+        func applyRecipe(_ recipe: TrafficRecipe) {
+            splitMode = recipe.mode
+            if recipe.id == "apps", !splitApps.isEmpty {
+                // keep the user’s current app chips
+            } else if !recipe.apps.isEmpty {
+                splitApps = recipe.apps
+            } else {
+                splitApps = []
+            }
+        }
+
+        func autoSetup(recipe: TrafficRecipe, environments: ExtensionEnvironments) async {
+            persistServer()
+            guard AgentAPI.configured else { return fail("auto-setup-skip", "Save server URL and token first.") }
+            busy = true
+            defer { busy = false }
+            proxyEnabled = false
+            persistProxy()
+            applyRecipe(recipe)
+            persistSplit()
+            DiagnosticsLog.log("app", "auto-setup", recipe.id)
+            var lines = [
+                recipe.title,
+                "Control channel: direct, not through a proxy.",
+            ]
+            do {
+                let id = await SharedPreferences.selectedProfileID.get()
+                guard id > 0, let profile = try await ProfileManager.get(id) else {
+                    return fail("auto-setup-skip", "Open Dashboard, select a profile, then run Auto setup.")
+                }
+                let json = try await profile.readAsync()
+                let patched = try SplitTunnel.apply(json)
+                var error: NSError?
+                LibboxCheckConfig(patched, &error)
+                if let error { throw error }
+                try await profile.writeAsync(patched)
+                profile.lastUpdated = Date()
+                try await ProfileManager.update(profile)
+                environments.postReload()
+                environments.profileUpdate.send()
+                lines.append("Routing saved on “\(profile.name)”.")
+            } catch {
+                return fail("auto-setup-split", error.localizedDescription)
+            }
+            do {
+                let reply = try await AgentAPI.send("ping")
+                if reply.status == 200 {
+                    lines.append("Server test: HTTP 200.")
+                    lines.append("Stop and start the tunnel once so routing applies.")
+                    ok("auto-setup-ok", lines.joined(separator: "\n"))
+                } else {
+                    lines.append("Server test: HTTP \(reply.status).")
+                    fail("auto-setup-test", lines.joined(separator: "\n"))
+                }
+            } catch {
+                lines.append("Server test failed. Start the tunnel, then tap Auto setup again.")
+                lines.append(error.localizedDescription)
+                fail("auto-setup-test", lines.joined(separator: "\n"))
+            }
+        }
+    }
+
+    struct TrafficRecipe: Identifiable, Hashable {
+        let id: String
+        let title: String
+        let summary: String
+        let mode: String
+        let apps: [String]
+
+        static let all: [TrafficRecipe] = [
+            TrafficRecipe(
+                id: "smart",
+                title: "Smart",
+                summary: "Apple, local network and this app’s server stay direct. Everything else uses the tunnel. Best default.",
+                mode: "smart",
+                apps: ["apple"]
+            ),
+            TrafficRecipe(
+                id: "full",
+                title: "Everything",
+                summary: "All internet through the tunnel. Local network still direct. Strongest cover, heavier on battery.",
+                mode: "all",
+                apps: []
+            ),
+            TrafficRecipe(
+                id: "apps",
+                title: "Only selected apps",
+                summary: "Only the chips you tap (Telegram, YouTube…) use the tunnel. The rest of the phone stays direct.",
+                mode: "whitelist",
+                apps: ["telegram", "youtube", "instagram"]
+            ),
+            TrafficRecipe(
+                id: "except",
+                title: "All except selected",
+                summary: "Tunnel for almost everything. Tapped apps (Apple, bank sites…) stay direct.",
+                mode: "blacklist",
+                apps: ["apple"]
+            ),
+        ]
+
+        static func matching(_ mode: String) -> TrafficRecipe {
+            all.first(where: { $0.mode == mode }) ?? all[0]
+        }
     }
 
     struct ActivityShareSheet: UIViewControllerRepresentable {
@@ -337,11 +441,17 @@
     public struct AgentCenterView: View {
         @EnvironmentObject private var environments: ExtensionEnvironments
         @StateObject private var viewModel = AgentCenterViewModel()
+        @State private var selectedRecipe = TrafficRecipe.matching(AgentSettings.splitMode)
+        @State private var showAdvanced = false
 
         public init() {}
 
         private var installedVersion: String {
             Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        }
+
+        private var showAppChips: Bool {
+            viewModel.splitMode == "whitelist" || viewModel.splitMode == "blacklist"
         }
 
         public var body: some View {
@@ -351,6 +461,66 @@
                         Text(viewModel.status)
                             .font(.footnote)
                     }
+                }
+                Section {
+                    Picker("Recipe", selection: $selectedRecipe) {
+                        ForEach(TrafficRecipe.all) { recipe in
+                            Text(recipe.title).tag(recipe)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: selectedRecipe, perform: { recipe in
+                        viewModel.applyRecipe(recipe)
+                    })
+                    Text(selectedRecipe.summary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    FormButton {
+                        Task { await viewModel.autoSetup(recipe: selectedRecipe, environments: environments) }
+                    } label: {
+                        Label("Auto setup", systemImage: "wand.and.stars")
+                    }
+                    .disabled(viewModel.busy)
+                } header: {
+                    Text("Auto setup")
+                } footer: {
+                    Text("Picks routing, keeps this app’s server off the proxy, writes it to the Dashboard profile, then tests the server. Restart the tunnel after it finishes.")
+                }
+                Section {
+                    Picker("Mode", selection: $viewModel.splitMode) {
+                        Text("Smart").tag("smart")
+                        Text("All").tag("all")
+                        Text("Only listed").tag("whitelist")
+                        Text("All except").tag("blacklist")
+                    }
+                    .pickerStyle(.segmented)
+                    if showAppChips {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 8)], spacing: 8) {
+                            ForEach(SplitTunnel.apps) { app in
+                                Toggle(app.title, isOn: viewModel.appBinding(app.id))
+                                    .toggleStyle(.button)
+                                    .font(.subheadline)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        TextField("Extra domains, comma separated", text: $viewModel.splitExtra)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } else if viewModel.splitMode == "smart" {
+                        Text("Apple, LAN and the control server stay direct. No chips to tap.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    FormButton {
+                        Task { await viewModel.applySplit(environments: environments) }
+                    } label: {
+                        Label("Apply to current profile", systemImage: "arrow.triangle.branch")
+                    }
+                    .disabled(viewModel.busy)
+                } header: {
+                    Text("Traffic")
+                } footer: {
+                    Text("iPhone cannot pin other App Store apps to a personal tunnel. These chips match sites and IPs. Apply, then stop and start the tunnel.")
                 }
                 Section {
                     TextField("http://host/ipa-api.php", text: $viewModel.serverURL)
@@ -371,160 +541,134 @@
                         Label("Test connection", systemImage: "checkmark.circle")
                     }
                     .disabled(viewModel.busy)
-                } header: {
-                    Text("1. Server")
-                } footer: {
-                    Text("Plain HTTP is allowed. Test does not use Apple’s URLSession, so ATS will not block it.")
-                }
-                Section {
-                    Toggle("Use proxy for Test and reports", isOn: $viewModel.proxyEnabled)
-                    Picker("Type", selection: $viewModel.proxyType) {
-                        Text("SOCKS5").tag("socks5")
-                        Text("HTTP").tag("http")
-                    }
-                    TextField("Host", text: $viewModel.proxyHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("Port", text: $viewModel.proxyPort)
-                        .keyboardType(.numberPad)
-                    TextField("Username", text: $viewModel.proxyUser)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("Password", text: $viewModel.proxyPassword)
-                    TextField("Profile name", text: $viewModel.proxyName)
-                        .textInputAutocapitalization(.never)
-                    FormButton {
-                        viewModel.saveProxy()
-                    } label: {
-                        Label("Save proxy", systemImage: "square.and.arrow.down")
-                    }
-                    FormButton {
-                        Task { await viewModel.pingProxy() }
-                    } label: {
-                        Label("Ping proxy", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    .disabled(viewModel.busy)
-                    FormButton {
-                        Task { await viewModel.importProxy(environments: environments) }
-                    } label: {
-                        Label("Make a tunnel profile", systemImage: "plus.circle")
-                    }
-                    .disabled(viewModel.busy)
-                } header: {
-                    Text("2. Proxy")
-                } footer: {
-                    Text("Ping now does a real SOCKS/HTTP login. “Make a tunnel profile” puts this proxy on the Dashboard so apps can use it. Then start that profile instead of the old one.")
-                }
-                Section {
-                    Picker("Mode", selection: $viewModel.splitMode) {
-                        Text("All").tag("all")
-                        Text("Only listed").tag("whitelist")
-                        Text("All except listed").tag("blacklist")
-                    }
-                    .pickerStyle(.segmented)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 8)], spacing: 8) {
-                        ForEach(SplitTunnel.apps) { app in
-                            Toggle(app.title, isOn: viewModel.appBinding(app.id))
-                                .toggleStyle(.button)
-                                .font(.subheadline)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                    TextField("Extra domains, comma separated", text: $viewModel.splitExtra)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    FormButton {
-                        Task { await viewModel.applySplit(environments: environments) }
-                    } label: {
-                        Label("Apply to current profile", systemImage: "arrow.triangle.branch")
-                    }
-                    .disabled(viewModel.busy)
-                } header: {
-                    Text("3. Split tunnel")
-                } footer: {
-                    Text("iPhone cannot attach other App Store apps to a personal VPN. These buttons match each app’s sites and IPs. All = everything through the tunnel. Only listed = those apps through the tunnel. All except listed = those apps go direct. Apply, then stop and start the tunnel.")
-                }
-                Section("Share link") {
-                    TextField("vless://…", text: $viewModel.shareLink)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    FormButton {
-                        Task { await viewModel.importShareLink(viewModel.shareLink, environments: environments) }
-                    } label: {
-                        Label("Import share link", systemImage: "link")
-                    }
-                    .disabled(viewModel.busy)
-                    FormButton {
-                        if let text = UIPasteboard.general.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            viewModel.shareLink = text
-                            Task { await viewModel.importShareLink(text, environments: environments) }
-                        } else {
-                            viewModel.fail("clipboard-empty", "Clipboard is empty")
-                        }
-                    } label: {
-                        Label("Paste and import", systemImage: "doc.on.clipboard")
-                    }
-                    .disabled(viewModel.busy)
-                    FormButton {
-                        viewModel.showQR = true
-                    } label: {
-                        Label("Scan QR", systemImage: "qrcode.viewfinder")
-                    }
-                    .disabled(viewModel.busy)
-                }
-                Section("Diagnostics") {
                     FormButton {
                         Task { await viewModel.sendDiagnostics() }
                     } label: {
                         Label("Send diagnostics", systemImage: "square.and.arrow.up")
                     }
                     .disabled(viewModel.busy)
+                } header: {
+                    Text("Server")
+                } footer: {
+                    Text("Same URL and token as before. Test and Send use a raw TCP client, not URLSession.")
                 }
-                Section("Profiles from agent") {
-                    if viewModel.profiles.isEmpty {
-                        Text("empty")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(viewModel.profiles) { entry in
-                        Button {
-                            Task { await viewModel.importProfile(entry, environments: environments) }
+                Section {
+                    Toggle("Show advanced", isOn: $showAdvanced)
+                }
+                if showAdvanced {
+                    Section {
+                        Toggle("Use proxy for Test and reports", isOn: $viewModel.proxyEnabled)
+                        Picker("Type", selection: $viewModel.proxyType) {
+                            Text("SOCKS5").tag("socks5")
+                            Text("HTTP").tag("http")
+                        }
+                        TextField("Host", text: $viewModel.proxyHost)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField("Port", text: $viewModel.proxyPort)
+                            .keyboardType(.numberPad)
+                        TextField("Username", text: $viewModel.proxyUser)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("Password", text: $viewModel.proxyPassword)
+                        TextField("Profile name", text: $viewModel.proxyName)
+                            .textInputAutocapitalization(.never)
+                        FormButton {
+                            viewModel.saveProxy()
                         } label: {
-                            VStack(alignment: .leading) {
-                                Text(entry.name)
-                                    .foregroundStyle(.primary)
-                                if let note = entry.note, !note.isEmpty {
-                                    Text(note)
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
+                            Label("Save proxy", systemImage: "square.and.arrow.down")
+                        }
+                        FormButton {
+                            Task { await viewModel.pingProxy() }
+                        } label: {
+                            Label("Ping proxy", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+                        .disabled(viewModel.busy)
+                        FormButton {
+                            Task { await viewModel.importProxy(environments: environments) }
+                        } label: {
+                            Label("Make a tunnel profile", systemImage: "plus.circle")
+                        }
+                        .disabled(viewModel.busy)
+                    } header: {
+                        Text("Proxy")
+                    } footer: {
+                        Text("Leave this off for Auto setup. Ping is a real SOCKS/HTTP login. “Make a tunnel profile” puts a SOCKS/HTTP outbound on Dashboard — not the same as a share link.")
+                    }
+                    Section("Share link") {
+                        TextField("Paste share link", text: $viewModel.shareLink)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        FormButton {
+                            Task { await viewModel.importShareLink(viewModel.shareLink, environments: environments) }
+                        } label: {
+                            Label("Import share link", systemImage: "link")
+                        }
+                        .disabled(viewModel.busy)
+                        FormButton {
+                            if let text = UIPasteboard.general.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                viewModel.shareLink = text
+                                Task { await viewModel.importShareLink(text, environments: environments) }
+                            } else {
+                                viewModel.fail("clipboard-empty", "Clipboard is empty")
+                            }
+                        } label: {
+                            Label("Paste and import", systemImage: "doc.on.clipboard")
+                        }
+                        .disabled(viewModel.busy)
+                        FormButton {
+                            viewModel.showQR = true
+                        } label: {
+                            Label("Scan QR", systemImage: "qrcode.viewfinder")
+                        }
+                        .disabled(viewModel.busy)
+                    }
+                    Section("Profiles from agent") {
+                        if viewModel.profiles.isEmpty {
+                            Text("empty")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(viewModel.profiles) { entry in
+                            Button {
+                                Task { await viewModel.importProfile(entry, environments: environments) }
+                            } label: {
+                                VStack(alignment: .leading) {
+                                    Text(entry.name)
+                                        .foregroundStyle(.primary)
+                                    if let note = entry.note, !note.isEmpty {
+                                        Text(note)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
+                            .disabled(viewModel.busy)
                         }
-                        .disabled(viewModel.busy)
-                    }
-                    FormButton {
-                        Task { await viewModel.reloadManifest(userInitiated: true) }
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(viewModel.busy)
-                }
-                Section("Build") {
-                    if let info = viewModel.buildInfo, let version = info.version {
-                        Text("server: \(version) / installed: \(installedVersion)")
-                            .font(.footnote)
                         FormButton {
-                            Task { await viewModel.downloadBuild() }
+                            Task { await viewModel.reloadManifest(userInitiated: true) }
                         } label: {
-                            Label("Download build", systemImage: "arrow.down.doc")
+                            Label("Refresh", systemImage: "arrow.clockwise")
                         }
                         .disabled(viewModel.busy)
                     }
-                    FormButton {
-                        Task { await viewModel.checkBuild(userInitiated: true) }
-                    } label: {
-                        Label("Check for build", systemImage: "arrow.triangle.2.circlepath")
+                    Section("Build") {
+                        if let info = viewModel.buildInfo, let version = info.version {
+                            Text("server: \(version) / installed: \(installedVersion)")
+                                .font(.footnote)
+                            FormButton {
+                                Task { await viewModel.downloadBuild() }
+                            } label: {
+                                Label("Download build", systemImage: "arrow.down.doc")
+                            }
+                            .disabled(viewModel.busy)
+                        }
+                        FormButton {
+                            Task { await viewModel.checkBuild(userInitiated: true) }
+                        } label: {
+                            Label("Check for build", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(viewModel.busy)
                     }
-                    .disabled(viewModel.busy)
                 }
             }
             .navigationTitle("Agent")

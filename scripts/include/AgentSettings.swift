@@ -50,7 +50,7 @@ public enum AgentSettings {
     }
 
     public static var splitMode: String {
-        get { store.string(forKey: "agent.splitMode") ?? "all" }
+        get { store.string(forKey: "agent.splitMode") ?? "smart" }
         set { store.set(newValue, forKey: "agent.splitMode") }
     }
 
@@ -115,6 +115,7 @@ public enum AgentAPI {
             tcp.connectionTimeout = 8
             let params = NWParameters(tls: nil, tcp: tcp)
             params.preferNoProxies = true
+            params.prohibitedInterfaceTypes = [.other]
             let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
             let started = Date()
             var finished = false
