@@ -27,4 +27,12 @@ Sign it on device with ESign / Feather / KSign using your own `.p12` and `.mobil
 3. Download artifact `Flashlight-unsigned`
 4. Sign in ESign the same way. There is no `.appex`. Change the bundle ID to match your provision if asked.
 
+## Probe test app
+
+1. **Actions** → **Build unsigned probe** → **Run workflow**
+2. Wait about 5 minutes (`macos-15`)
+3. Download artifact `Probe-unsigned`
+4. Sign in ESign the same way. There is no `.appex`. You may change the bundle ID.
+5. In the app: paste server URL + token → tap a method → Copy the popup.
+
 Do not commit `.p12`, passwords, or live configs.
