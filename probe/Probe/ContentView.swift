@@ -225,7 +225,12 @@ struct ProxyProbePage: View {
                         .foregroundStyle(.secondary)
 
                     field("Whoami URL", text: $target)
-                    Text("HTTP only, default http://api.ipify.org")
+                    HStack {
+                        Button("HTTP ipify") { target = "http://api.ipify.org" }
+                        Button("HTTPS ipify") { target = "https://api.ipify.org" }
+                    }
+                    .font(.footnote)
+                    Text("HTTP = CONNECT+GET. HTTPS = CONNECT to :443 then TLS, like a browser.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 

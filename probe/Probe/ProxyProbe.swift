@@ -92,25 +92,33 @@ enum ProxyProbe {
         log.line("WHOAMI_HOST", target.host)
         log.line("WHOAMI_PORT", "\(target.port)")
         log.line("WHOAMI_TLS", target.tls ? "yes" : "no")
-        if target.tls {
-            throw ProxyFail("Whoami through the tunnel is HTTP-only. Use http://api.ipify.org")
-        }
         let started = Date()
-        let connection = try await openTunnel(input: input, dest: target, log: log)
-        defer { connection.cancel() }
-        let packet = httpGet(host: target.host, port: target.port, path: target.path)
-        log.line("PACKET_BYTES", "\(packet.count)")
-        log.line("STEP", "http-send")
-        try await send(connection, packet)
-        log.line("STEP", "http-recv")
-        let raw = try await receiveAll(connection, limit: 64_000)
-        log.line("RAW_BYTES", "\(raw.count)")
-        let reply = try parseHTTP(raw)
+        let reply: (status: Int, body: String, rawBytes: Int)
+        if target.tls {
+            log.line("STACK", "urlsession-https")
+            log.line("STEP", "https-via-proxy")
+            let got = try await urlSessionViaProxy(input: input, target: target)
+            reply = (got.status, got.text, got.body.count)
+            log.line("STEP", "https-reply")
+        } else {
+            log.line("STACK", "connect-http")
+            let connection = try await openTunnel(input: input, dest: target, log: log)
+            defer { connection.cancel() }
+            let packet = httpGet(host: target.host, port: target.port, path: target.path)
+            log.line("PACKET_BYTES", "\(packet.count)")
+            log.line("STEP", "http-send")
+            try await send(connection, packet)
+            log.line("STEP", "http-recv")
+            let raw = try await receiveAll(connection, limit: 64_000)
+            let parsed = try parseHTTP(raw)
+            reply = (parsed.status, parsed.text, raw.count)
+        }
         let ms = Int(Date().timeIntervalSince(started) * 1000)
-        let ip = extractIP(reply.text)
+        let ip = extractIP(reply.body)
         log.line("ELAPSED_MS", "\(ms)")
+        log.line("RAW_BYTES", "\(reply.rawBytes)")
         log.line("HTTP_STATUS", "\(reply.status)")
-        log.line("BODY", clip(reply.text.trimmingCharacters(in: .whitespacesAndNewlines), 400))
+        log.line("BODY", clip(reply.body.trimmingCharacters(in: .whitespacesAndNewlines), 400))
         log.line("SEEN_IP", ip)
         if reply.status == 200, !ip.isEmpty {
             log.line("RESULT", "success")
@@ -133,16 +141,24 @@ enum ProxyProbe {
         do {
             let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
             if target.tls {
-                throw ProxyFail("Compare is HTTP-only. Use http://api.ipify.org")
+                log.line("DIRECT_STACK", "urlsession-https")
+                let got = try await urlSessionDirect(target: target)
+                directMS = Int(Date().timeIntervalSince(directStarted) * 1000)
+                directIP = extractIP(got.text)
+                log.line("DIRECT_MS", "\(directMS)")
+                log.line("DIRECT_STATUS", "\(got.status)")
+                log.line("DIRECT_IP", directIP)
+                log.line("DIRECT_BODY", clip(got.text.trimmingCharacters(in: .whitespacesAndNewlines), 200))
+            } else {
+                let raw = try await directGET(target)
+                let reply = try parseHTTP(raw)
+                directMS = Int(Date().timeIntervalSince(directStarted) * 1000)
+                directIP = extractIP(reply.text)
+                log.line("DIRECT_MS", "\(directMS)")
+                log.line("DIRECT_STATUS", "\(reply.status)")
+                log.line("DIRECT_IP", directIP)
+                log.line("DIRECT_BODY", clip(reply.text.trimmingCharacters(in: .whitespacesAndNewlines), 200))
             }
-            let raw = try await directGET(target)
-            let reply = try parseHTTP(raw)
-            directMS = Int(Date().timeIntervalSince(directStarted) * 1000)
-            directIP = extractIP(reply.text)
-            log.line("DIRECT_MS", "\(directMS)")
-            log.line("DIRECT_STATUS", "\(reply.status)")
-            log.line("DIRECT_IP", directIP)
-            log.line("DIRECT_BODY", clip(reply.text.trimmingCharacters(in: .whitespacesAndNewlines), 200))
         } catch {
             directMS = Int(Date().timeIntervalSince(directStarted) * 1000)
             log.line("DIRECT_MS", "\(directMS)")
@@ -287,8 +303,18 @@ enum ProxyProbe {
 
     private static func whoamiInner(input: ProxyInput) async throws -> WhoamiDump {
         let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
-        if target.tls { throw ProxyFail("Whoami is HTTP-only. Use http://api.ipify.org") }
         let started = Date()
+        if target.tls {
+            let got = try await urlSessionViaProxy(input: input, target: target)
+            let ip = extractIP(got.text)
+            return WhoamiDump(
+                ok: got.status == 200 && !ip.isEmpty,
+                status: got.status,
+                ip: ip,
+                body: got.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                ms: Int(Date().timeIntervalSince(started) * 1000)
+            )
+        }
         let connection = try await openTunnel(input: input, dest: target, log: ProxyLog())
         defer { connection.cancel() }
         try await send(connection, httpGet(host: target.host, port: target.port, path: target.path))
@@ -535,6 +561,82 @@ enum ProxyProbe {
         return try await receiveAll(connection, limit: 64_000)
     }
 
+    private static func urlSessionViaProxy(input: ProxyInput, target: Target) async throws -> HTTPReply {
+        if input.wrap == .tls {
+            throw ProxyFail("HTTPS whoami needs Wrap=None")
+        }
+        guard let url = absoluteURL(target) else { throw ProxyFail("Bad HTTPS URL") }
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 12
+        config.connectionProxyDictionary = proxyDictionary(input)
+        let auth = ProxyAuthDelegate(user: input.user, password: input.password)
+        let session = URLSession(configuration: config, delegate: auth, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        request.setValue("Probe/1.1", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        return HTTPReply(status: status, body: data)
+    }
+
+    private static func urlSessionDirect(target: Target) async throws -> HTTPReply {
+        guard let url = absoluteURL(target) else { throw ProxyFail("Bad HTTPS URL") }
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 12
+        config.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.setValue("Probe/1.1", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        return HTTPReply(status: status, body: data)
+    }
+
+    private static func absoluteURL(_ target: Target) -> URL? {
+        var parts = URLComponents()
+        parts.scheme = target.tls ? "https" : "http"
+        parts.host = target.host
+        let implicit = (target.tls && target.port == 443) || (!target.tls && target.port == 80)
+        if !implicit {
+            parts.port = Int(target.port)
+        }
+        let split = target.path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        parts.path = split.first?.isEmpty == true ? "/" : (split.first ?? "/")
+        if split.count == 2 {
+            parts.query = split[1]
+        }
+        return parts.url
+    }
+
+    private static func proxyDictionary(_ input: ProxyInput) -> [AnyHashable: Any] {
+        if input.kind == .http {
+            return [
+                "HTTPEnable": 1,
+                "HTTPProxy": input.host,
+                "HTTPPort": Int(input.port),
+                "HTTPSEnable": 1,
+                "HTTPSProxy": input.host,
+                "HTTPSPort": Int(input.port),
+            ]
+        }
+        var dict: [AnyHashable: Any] = [
+            "SOCKSEnable": 1,
+            "SOCKSProxy": input.host,
+            "SOCKSPort": Int(input.port),
+        ]
+        if !input.user.isEmpty {
+            dict["SOCKSUser"] = input.user
+            dict["SOCKSPassword"] = input.password
+        }
+        return dict
+    }
+
     private static func httpGet(host: String, port: UInt16, path: String) -> Data {
         let hostHeader = port == 80 ? host : "\(host):\(port)"
         var head = "GET \(path) HTTP/1.0\r\n"
@@ -617,6 +719,51 @@ enum ProxyProbe {
     private static func clip(_ text: String, _ max: Int) -> String {
         if text.count <= max { return text }
         return String(text.prefix(max)) + "…(truncated)"
+    }
+}
+
+private final class ProxyAuthDelegate: NSObject, URLSessionTaskDelegate, URLSessionDelegate {
+    let user: String
+    let password: String
+
+    init(user: String, password: String) {
+        self.user = user
+        self.password = password
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handle(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handle(challenge, completionHandler: completionHandler)
+    }
+
+    private func handle(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if challenge.protectionSpace.isProxy {
+            if user.isEmpty {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(
+                .useCredential,
+                URLCredential(user: user, password: password, persistence: .forSession)
+            )
+            return
+        }
+        completionHandler(.performDefaultHandling, nil)
     }
 }
 
