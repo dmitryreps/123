@@ -752,7 +752,8 @@ private final class ProxyAuthDelegate: NSObject, URLSessionTaskDelegate, URLSess
         _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        if challenge.protectionSpace.isProxy {
+        let proxyType = challenge.protectionSpace.proxyType ?? ""
+        if !proxyType.isEmpty {
             if user.isEmpty {
                 completionHandler(.cancelAuthenticationChallenge, nil)
                 return
