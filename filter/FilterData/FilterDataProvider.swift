@@ -13,6 +13,6 @@ class FilterDataProvider: NEFilterDataProvider {
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
         FlowLog.append(flow: flow)
-        return .allow()
+        return NEFilterNewFlowVerdict.allow()
     }
 }

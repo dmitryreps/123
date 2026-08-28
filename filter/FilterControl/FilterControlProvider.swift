@@ -12,6 +12,6 @@ class FilterControlProvider: NEFilterControlProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow, completionHandler: @escaping (NEFilterControlVerdict) -> Void) {
-        completionHandler(.allow(withFilterData: true, withUpdate: false))
+        completionHandler(NEFilterControlVerdict.allow(withUpdateRules: false))
     }
 }
