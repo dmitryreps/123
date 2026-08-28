@@ -83,6 +83,14 @@ public enum VLESSImport {
         if !tls.isEmpty {
             outbound["tls"] = tls
         }
+        let obfuscation = AgentSettings.obfuscation
+        if obfuscation == "shadowtls", tls.isEmpty {
+            outbound["tls"] = [
+                "enabled": true,
+                "server_name": "www.apple.com",
+                "utls": ["enabled": true, "fingerprint": "chrome"],
+            ]
+        }
         if network == "ws" {
             var transport: [String: Any] = [
                 "type": "ws",
@@ -109,7 +117,8 @@ public enum VLESSImport {
                 "address": ["172.19.0.1/30"],
                 "auto_route": true,
                 "strict_route": true,
-                "stack": "system",
+                "stack": AgentSettings.tunStack,
+                "mtu": AgentSettings.tunMTU,
             ]],
             "outbounds": [
                 outbound,

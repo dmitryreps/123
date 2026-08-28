@@ -48,6 +48,9 @@
         @Published var splitMode = AgentSettings.splitMode
         @Published var splitApps = AgentSettings.splitApps
         @Published var splitExtra = AgentSettings.splitExtra
+        @Published var tunMTU = String(AgentSettings.tunMTU)
+        @Published var tunStack = AgentSettings.tunStack
+        @Published var obfuscation = AgentSettings.obfuscation
 
         func fail(_ event: String, _ message: String) {
             status = message
@@ -340,6 +343,9 @@
             AgentSettings.splitMode = splitMode
             AgentSettings.splitApps = splitApps
             AgentSettings.splitExtra = splitExtra
+            AgentSettings.tunMTU = Int(tunMTU) ?? 1400
+            AgentSettings.tunStack = tunStack
+            AgentSettings.obfuscation = obfuscation
         }
 
         func applyRecipe(_ recipe: TrafficRecipe) {
@@ -693,6 +699,26 @@
                     Text("Server")
                 } footer: {
                     Text("Same URL and token as before. Test and Send use a POSIX socket first, then TCP if that fails.")
+                }
+                Section {
+                    Picker("Stack", selection: $viewModel.tunStack) {
+                        Text("gVisor (fast)").tag("gvisor")
+                        Text("System (stable)").tag("system")
+                        Text("Mixed").tag("mixed")
+                    }
+                    .pickerStyle(.menu)
+                    TextField("MTU", text: $viewModel.tunMTU)
+                        .keyboardType(.numberPad)
+                    Picker("Masking", selection: $viewModel.obfuscation) {
+                        Text("TLS (HTTPS look)").tag("tls")
+                        Text("ShadowTLS (Apple)").tag("shadowtls")
+                        Text("None").tag("none")
+                    }
+                    .pickerStyle(.menu)
+                } header: {
+                    Text("Network")
+                } footer: {
+                    Text("gVisor + MTU 1400 is the default for iOS. Lower MTU (1280) if the tunnel drops. Masking wraps the proxy in TLS so it looks like HTTPS.")
                 }
                 Section {
                     Toggle("Show advanced", isOn: $showAdvanced)

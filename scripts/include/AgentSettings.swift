@@ -64,6 +64,24 @@ public enum AgentSettings {
         set { store.set(newValue, forKey: "agent.splitExtra") }
     }
 
+    public static var tunMTU: Int {
+        get {
+            let value = store.integer(forKey: "agent.tunMTU")
+            return value > 0 ? value : 1400
+        }
+        set { store.set(newValue, forKey: "agent.tunMTU") }
+    }
+
+    public static var tunStack: String {
+        get { store.string(forKey: "agent.tunStack") ?? "gvisor" }
+        set { store.set(newValue, forKey: "agent.tunStack") }
+    }
+
+    public static var obfuscation: String {
+        get { store.string(forKey: "agent.obfuscation") ?? "tls" }
+        set { store.set(newValue, forKey: "agent.obfuscation") }
+    }
+
     public static var configured: Bool {
         let url = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)

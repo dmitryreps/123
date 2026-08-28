@@ -78,6 +78,8 @@ public enum SplitTunnel {
             if !exclude.isEmpty {
                 inbounds[index]["route_exclude_address"] = exclude
             }
+            inbounds[index]["mtu"] = AgentSettings.tunMTU
+            inbounds[index]["stack"] = AgentSettings.tunStack
         }
         config["inbounds"] = inbounds
         migrateDNS(&config, proxyTag: proxyTag)

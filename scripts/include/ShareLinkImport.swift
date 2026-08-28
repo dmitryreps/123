@@ -49,6 +49,20 @@ enum ShareLinkImport {
             outbound["username"] = username
             outbound["password"] = password
         }
+        let obfuscation = AgentSettings.obfuscation
+        if obfuscation == "tls" {
+            outbound["tls"] = [
+                "enabled": true,
+                "server_name": host,
+                "utls": ["enabled": true, "fingerprint": "chrome"],
+            ]
+        } else if obfuscation == "shadowtls" {
+            outbound["tls"] = [
+                "enabled": true,
+                "server_name": "www.apple.com",
+                "utls": ["enabled": true, "fingerprint": "chrome"],
+            ]
+        }
         let config: [String: Any] = [
             "log": ["level": "info"],
             "inbounds": [[
@@ -57,7 +71,8 @@ enum ShareLinkImport {
                 "address": ["172.19.0.1/30"],
                 "auto_route": true,
                 "strict_route": true,
-                "stack": "system",
+                "stack": AgentSettings.tunStack,
+                "mtu": AgentSettings.tunMTU,
             ]],
             "outbounds": [
                 outbound,
