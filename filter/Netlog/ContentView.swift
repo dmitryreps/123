@@ -35,6 +35,10 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                 }
+                Button("Install profile") { Task { await saveProfile() } }
+                    .buttonStyle(.bordered)
+                    .disabled(busy)
+                Text("If Start watch says permission denied, tap Install profile, install it in Settings, then tap Start watch again.")
                 Text("Leave this screen. Open Telegram, Safari, YouTube. Come back — APP= is the bundle id. Traffic is allowed, not blocked.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -103,6 +107,66 @@ struct ContentView: View {
             let ns = error as NSError
             status = "SAVE_FAIL domain=\(ns.domain) code=\(ns.code) \(ns.localizedDescription). Distribution/ESign often gets permission denied without supervised device + get-task-allow."
             dump = DumpItem(title: "ERROR", text: status)
+        }
+    }
+
+    private func saveProfile() async {
+        busy = true
+        defer { busy = false }
+        let uuid = UUID().uuidString
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+        	<key>PayloadContent</key>
+        	<array>
+        		<dict>
+        			<key>PayloadType</key>
+        			<string>com.apple.webcontent-filter</string>
+        			<key>PayloadVersion</key>
+        			<integer>1</integer>
+        			<key>PayloadIdentifier</key>
+        			<string>app.local.netlog.profile.\(uuid)</string>
+        			<key>PayloadUUID</key>
+        			<string>\(uuid)</string>
+        			<key>PayloadDisplayName</key>
+        			<string>Netlog Filter</string>
+        			<key>FilterType</key>
+        			<string>Plugin</string>
+        			<key>FilterSockets</key>
+        			<true/>
+        			<key>FilterBrowsers</key>
+        			<true/>
+        			<key>UserDefinedName</key>
+        			<string>Netlog</string>
+        			<key>PluginBundleID</key>
+        			<string>app.local.netlog</string>
+        			<key>ContentFilterUUID</key>
+        			<string>\(uuid)</string>
+        		</dict>
+        	</array>
+        	<key>PayloadDisplayName</key>
+        	<string>Netlog Filter</string>
+        	<key>PayloadIdentifier</key>
+        	<string>app.local.netlog.profile</string>
+        	<key>PayloadType</key>
+        	<string>Configuration</string>
+        	<key>PayloadUUID</key>
+        	<string>\(uuid)</string>
+        	<key>PayloadVersion</key>
+        	<integer>1</integer>
+        </dict>
+        </plist>
+        """
+        let dir = FileManager.default.temporaryDirectory
+        let file = dir.appendingPathComponent("Netlog.mobileconfig")
+        do {
+            try plist.write(to: file, atomically: true, encoding: .utf8)
+            status = "Profile saved. Opening Settings… install it, then come back and tap Start watch."
+            UIApplication.shared.open(file)
+        } catch {
+            status = "Profile save failed: \(error.localizedDescription)"
         }
     }
 
