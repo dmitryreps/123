@@ -164,7 +164,7 @@ struct ContentView: View {
         do {
             try plist.write(to: file, atomically: true, encoding: .utf8)
             status = "Profile saved. Opening Settings… install it, then come back and tap Start watch."
-            UIApplication.shared.open(file)
+            await UIApplication.shared.open(file)
         } catch {
             status = "Profile save failed: \(error.localizedDescription)"
         }
