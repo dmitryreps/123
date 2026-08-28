@@ -39,6 +39,12 @@ struct ContentView: View {
                             .font(.footnote)
                     }
 
+                    Button(action: saveSettings) {
+                        label("Save URL and token", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || !ready)
+
                     section("URLSession") {
                         row(.urlSessionGet)
                         row(.urlSessionPost)
@@ -55,7 +61,7 @@ struct ContentView: View {
                     Button(action: { goAll() }) {
                         label("Run all 6", systemImage: "square.stack.3d.up")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                     .disabled(busy || !ready)
 
                     if busy {
@@ -102,6 +108,27 @@ struct ContentView: View {
         Label(title, systemImage: systemImage)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
+    }
+
+    private func saveSettings() {
+        baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(baseURL, forKey: "probe.baseURL")
+        UserDefaults.standard.set(token, forKey: "probe.token")
+        UserDefaults.standard.synchronize()
+        let host = URL(string: baseURL)?.host ?? ""
+        dump = ProbeDump(
+            ok: true,
+            title: "SAVED",
+            text: [
+                "RESULT=saved",
+                "URL=\(baseURL)",
+                "URL_HOST=\(host)",
+                "TOKEN_SET=yes",
+                "TOKEN_LEN=\(token.count)",
+                "MEANING=URL and token stored on this phone. Token is not shown here. Close the app and reopen — fields should still be filled.",
+            ].joined(separator: "\n")
+        )
     }
 
     private func go(_ kind: ProbeKind) {
