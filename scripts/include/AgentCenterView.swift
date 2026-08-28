@@ -182,7 +182,11 @@
             do {
                 let reply = try await AgentAPI.send("report", query: ["device": "iphone"], method: "POST", body: Data(log.utf8))
                 if reply.status == 200 {
-                    ok("send-report-ok", "Diagnostics sent.")
+                    if reply.via.isEmpty || reply.via == "nw" {
+                        ok("send-report-ok", "Diagnostics sent.")
+                    } else {
+                        ok("send-report-ok", "Diagnostics sent via backup (\(reply.via)).")
+                    }
                 } else {
                     fail("send-report-fail", "report failed: http \(reply.status) \(reply.text)")
                 }
@@ -550,7 +554,7 @@
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("Same URL and token as before. Test and Send use a raw TCP client, not URLSession.")
+                    Text("Same URL and token as before. Test and Send try a raw TCP client first, then a POSIX socket, then TCP again without the tunnel-interface ban.")
                 }
                 Section {
                     Toggle("Show advanced", isOn: $showAdvanced)

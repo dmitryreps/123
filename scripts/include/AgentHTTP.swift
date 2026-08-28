@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 
 enum AgentHTTPError: Error, LocalizedError {
     case badURL
@@ -25,10 +26,69 @@ public enum AgentHTTP {
     public struct Reply {
         public var status: Int
         public var body: Data
+        public var via: String
         public var text: String { String(data: body, encoding: .utf8) ?? "" }
+
+        public init(status: Int, body: Data, via: String = "") {
+            self.status = status
+            self.body = body
+            self.via = via
+        }
     }
 
     public static func perform(_ request: URLRequest) async throws -> Reply {
+        var lastError: Error = AgentHTTPError.timeout
+        let tls = request.url?.scheme?.lowercased() == "https"
+        let steps: [(name: String, posix: Bool, prohibitOther: Bool)] = [
+            ("nw", false, true),
+            ("posix", true, false),
+            ("nw-any", false, false),
+        ]
+        for step in steps {
+            if step.posix, tls {
+                DiagnosticsLog.log("app", "http-skip", "posix https")
+                continue
+            }
+            do {
+                DiagnosticsLog.log("app", "http-try", step.name)
+                var reply: Reply
+                if step.posix {
+                    reply = try await performPOSIX(request)
+                } else {
+                    let useProxy = step.name == "nw" && AgentSettings.proxyEnabled && AgentSettings.proxyConfigured
+                    reply = try await performNW(request, prohibitOther: step.prohibitOther, useProxy: useProxy)
+                }
+                reply.via = step.name
+                DiagnosticsLog.log("app", "http-via", step.name)
+                return reply
+            } catch {
+                lastError = error
+                DiagnosticsLog.log("app", "http-try-fail", "\(step.name) \(error.localizedDescription)")
+                if !shouldRetry(error) { throw error }
+            }
+        }
+        throw lastError
+    }
+
+    private static func shouldRetry(_ error: Error) -> Bool {
+        if let http = error as? AgentHTTPError {
+            switch http {
+            case .timeout, .closed, .socks, .proxy:
+                return true
+            case .http(let text):
+                return text.lowercased().contains("incomplete")
+            case .badURL:
+                return false
+            }
+        }
+        if isStreamEOF(error) { return true }
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain { return true }
+        if ns.domain == NSURLErrorDomain { return true }
+        return true
+    }
+
+    private static func performNW(_ request: URLRequest, prohibitOther: Bool, useProxy: Bool) async throws -> Reply {
         guard let url = request.url, let host = url.host, !host.isEmpty else {
             throw AgentHTTPError.badURL
         }
@@ -48,16 +108,15 @@ public enum AgentHTTP {
             headers["Content-Length"] = "\(body.count)"
         }
 
-        let useProxy = AgentSettings.proxyEnabled && AgentSettings.proxyConfigured
         let proxyType = AgentSettings.proxyType
         let started = Date()
-        DiagnosticsLog.log("app", "http-start", "\(method) \(host):\(port) proxy=\(useProxy ? proxyType : "off")")
+        DiagnosticsLog.log("app", "http-start", "\(method) \(host):\(port) proxy=\(useProxy ? proxyType : "off") utun=\(prohibitOther ? "off" : "any")")
 
         let connection: NWConnection
         if useProxy {
-            connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false)
+            connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: prohibitOther)
         } else {
-            connection = try await connect(host: host, port: port, tls: tls)
+            connection = try await connect(host: host, port: port, tls: tls, prohibitOther: prohibitOther)
         }
         defer { connection.cancel() }
         DiagnosticsLog.log("app", "http-connect", "ok")
@@ -89,11 +148,114 @@ public enum AgentHTTP {
         data.append(body)
         try await send(connection, data)
         DiagnosticsLog.log("app", "http-sent", "bytes=\(data.count)")
-        let raw = try await receiveAll(connection, limit: 80_000_000)
+        let raw = try await receiveAll(connection, limit: 80_000_000, deadline: Date().addingTimeInterval(25))
         let elapsed = Int(Date().timeIntervalSince(started) * 1000)
         let reply = try parseHTTP(raw)
         DiagnosticsLog.log("app", "http-reply", "status=\(reply.status) bytes=\(reply.body.count) \(elapsed)ms")
         return reply
+    }
+
+    private static func performPOSIX(_ request: URLRequest) async throws -> Reply {
+        guard let url = request.url, let host = url.host, !host.isEmpty else {
+            throw AgentHTTPError.badURL
+        }
+        let tls = url.scheme?.lowercased() == "https"
+        if tls { throw AgentHTTPError.http("POSIX fallback is HTTP-only") }
+        let port = UInt16(url.port ?? 80)
+        let method = request.httpMethod ?? "GET"
+        var headers = request.allHTTPHeaderFields ?? [:]
+        let body = request.httpBody ?? Data()
+        if headers["Host"] == nil {
+            headers["Host"] = port == 80 ? host : "\(host):\(port)"
+        }
+        headers["Connection"] = "close"
+        headers["Accept-Encoding"] = "identity"
+        if !body.isEmpty {
+            headers["Content-Length"] = "\(body.count)"
+        }
+        headers["User-Agent"] = "SFI-Agent/posix"
+        let path = urlRequestPath(url)
+        var packet = "\(method) \(path) HTTP/1.0\r\n"
+        for (key, value) in headers {
+            packet += "\(key): \(value)\r\n"
+        }
+        packet += "\r\n"
+        var data = Data(packet.utf8)
+        data.append(body)
+        DiagnosticsLog.log("app", "http-start", "\(method) \(host):\(port) posix")
+        let raw: Data = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    continuation.resume(returning: try posixRequest(host: host, port: port, packet: data))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        DiagnosticsLog.log("app", "http-recv", "posix bytes=\(raw.count)")
+        return try parseHTTP(raw)
+    }
+
+    private static func posixRequest(host: String, port: UInt16, packet: Data) throws -> Data {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        hints.ai_protocol = IPPROTO_TCP
+        var info: UnsafeMutablePointer<addrinfo>?
+        let rc = getaddrinfo(host, String(port), &hints, &info)
+        guard rc == 0, let first = info else {
+            throw AgentHTTPError.timeout
+        }
+        defer { freeaddrinfo(first) }
+        guard let aiAddr = first.pointee.ai_addr else { throw AgentHTTPError.timeout }
+        let fd = Darwin.socket(first.pointee.ai_family, SOCK_STREAM, IPPROTO_TCP)
+        if fd < 0 { throw AgentHTTPError.closed }
+        defer { Darwin.close(fd) }
+        var nosig: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, socklen_t(MemoryLayout<Int32>.size))
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        let cr = Darwin.connect(fd, aiAddr, first.pointee.ai_addrlen)
+        if cr != 0, errno != EINPROGRESS {
+            throw AgentHTTPError.timeout
+        }
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let pr = poll(&pfd, 1, 12_000)
+        if pr <= 0 { throw AgentHTTPError.timeout }
+        var err: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        _ = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+        _ = fcntl(fd, F_SETFL, flags)
+        if err != 0 { throw AgentHTTPError.timeout }
+        try packet.withUnsafeBytes { raw in
+            var sent = 0
+            let total = raw.count
+            let base = raw.bindMemory(to: UInt8.self).baseAddress!
+            while sent < total {
+                let n = Darwin.send(fd, base + sent, total - sent, 0)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw AgentHTTPError.closed
+                }
+                sent += n
+            }
+        }
+        var tv = timeval(tv_sec: 20, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 16 * 1024)
+        while out.count < 80_000_000 {
+            let n = Darwin.recv(fd, &buf, buf.count, 0)
+            if n == 0 { break }
+            if n < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK { break }
+                throw AgentHTTPError.closed
+            }
+            out.append(contentsOf: buf.prefix(n))
+            if looksCompleteHTTP(out) { break }
+        }
+        return out
     }
 
     public static func pingProxy() async throws -> Int {
@@ -101,7 +263,7 @@ public enum AgentHTTP {
             throw AgentHTTPError.proxy("Fill host and port first")
         }
         let started = Date()
-        let connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false)
+        let connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: true)
         defer { connection.cancel() }
         if AgentSettings.proxyType == "http" {
             try await httpConnect(connection, host: "1.1.1.1", port: 443)
@@ -124,21 +286,23 @@ public enum AgentHTTP {
         return "Basic \(Data(raw.utf8).base64EncodedString())"
     }
 
-    private static func connect(host: String, port: UInt16, tls: Bool) async throws -> NWConnection {
+    private static func connect(host: String, port: UInt16, tls: Bool, prohibitOther: Bool) async throws -> NWConnection {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw AgentHTTPError.badURL }
         let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = 12
+        tcp.connectionTimeout = 15
         let params = tls
             ? NWParameters(tls: NWProtocolTLS.Options(), tcp: tcp)
             : NWParameters(tls: nil, tcp: tcp)
         params.preferNoProxies = true
-        params.prohibitedInterfaceTypes = [.other]
+        if prohibitOther {
+            params.prohibitedInterfaceTypes = [.other]
+        }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
-        try await waitReady(connection)
+        try await waitReady(connection, seconds: 15)
         return connection
     }
 
-    private static func waitReady(_ connection: NWConnection) async throws {
+    private static func waitReady(_ connection: NWConnection, seconds: TimeInterval) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var finished = false
             func finish(_ result: Result<Void, Error>) {
@@ -159,7 +323,7 @@ public enum AgentHTTP {
                 }
             }
             connection.start(queue: .global())
-            DispatchQueue.global().asyncAfter(deadline: .now() + 12) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
                 finish(.failure(AgentHTTPError.timeout))
             }
         }
@@ -224,9 +388,13 @@ public enum AgentHTTP {
         return false
     }
 
-    private static func receiveAll(_ connection: NWConnection, limit: Int) async throws -> Data {
+    private static func receiveAll(_ connection: NWConnection, limit: Int, deadline: Date = Date().addingTimeInterval(25)) async throws -> Data {
         var data = Data()
         while data.count < limit {
+            if Date() > deadline {
+                if data.isEmpty { throw AgentHTTPError.timeout }
+                break
+            }
             do {
                 let chunk = try await receiveSome(connection, min: 1, max: min(64 * 1024, limit - data.count))
                 if chunk.isEmpty { break }

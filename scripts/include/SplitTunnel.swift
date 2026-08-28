@@ -80,15 +80,7 @@ public enum SplitTunnel {
             }
         }
         config["inbounds"] = inbounds
-        if config["dns"] == nil {
-            config["dns"] = [
-                "servers": [
-                    ["tag": "remote", "address": "8.8.8.8", "detour": proxyTag],
-                    ["tag": "local", "address": "local", "detour": "direct"],
-                ],
-                "strategy": "ipv4_only",
-            ]
-        }
+        migrateDNS(&config, proxyTag: proxyTag)
 
         var route = config["route"] as? [String: Any] ?? [:]
         route["rules"] = buildRules(proxyTag: proxyTag)
@@ -163,6 +155,104 @@ public enum SplitTunnel {
             }
         }
         return rules
+    }
+
+    /// sing-box 1.12 deprecates `{ "address": "8.8.8.8" }`; 1.14 removes it.
+    private static func migrateDNS(_ config: inout [String: Any], proxyTag: String) {
+        var dns = config["dns"] as? [String: Any] ?? [:]
+        var servers: [[String: Any]] = []
+        if let list = dns["servers"] as? [Any] {
+            for item in list {
+                if let migrated = migrateDNSServer(item) {
+                    servers.append(migrated)
+                }
+            }
+        }
+        if servers.isEmpty {
+            servers = [
+                ["type": "udp", "tag": "remote", "server": "8.8.8.8", "detour": proxyTag],
+                ["type": "local", "tag": "local"],
+            ]
+        }
+        attachDomainResolver(&servers)
+        dns["servers"] = servers
+        dns.removeValue(forKey: "independent_cache")
+        if dns["strategy"] == nil {
+            dns["strategy"] = "ipv4_only"
+        }
+        config["dns"] = dns
+    }
+
+    private static func migrateDNSServer(_ raw: Any) -> [String: Any]? {
+        if let address = raw as? String {
+            return migrateDNSServer(["address": address])
+        }
+        guard var server = raw as? [String: Any] else { return nil }
+        if let type = server["type"] as? String, !type.isEmpty {
+            return server
+        }
+        guard let address = server["address"] as? String, !address.isEmpty else {
+            return nil
+        }
+        server.removeValue(forKey: "address")
+        server.removeValue(forKey: "address_resolver")
+        server.removeValue(forKey: "address_strategy")
+        server.removeValue(forKey: "strategy")
+        if address == "local" || address.hasPrefix("local://") {
+            server["type"] = "local"
+            return server
+        }
+        if address.hasPrefix("rcode://") {
+            return nil
+        }
+        var type = "udp"
+        var rest = address
+        if let range = address.range(of: "://") {
+            type = String(address[..<range.lowerBound]).lowercased()
+            rest = String(address[range.upperBound...])
+            if type == "tcp+udp" { type = "udp" }
+        }
+        if type == "dhcp" {
+            server["type"] = "dhcp"
+            return server
+        }
+        if type == "https" || type == "h3", let slash = rest.firstIndex(of: "/") {
+            rest = String(rest[..<slash])
+        }
+        if rest.contains(":"), !rest.hasPrefix("[") {
+            let parts = rest.split(separator: ":", maxSplits: 1)
+            if parts.count == 2, let port = Int(parts[1]), (1 ... 65535).contains(port) {
+                rest = String(parts[0])
+                if server["server_port"] == nil {
+                    server["server_port"] = port
+                }
+            }
+        }
+        server["type"] = type
+        server["server"] = rest
+        return server
+    }
+
+    private static func attachDomainResolver(_ servers: inout [[String: Any]]) {
+        let needs = servers.contains { server in
+            let type = server["type"] as? String ?? ""
+            if type == "local" || type == "dhcp" { return false }
+            if server["domain_resolver"] != nil { return false }
+            return optionalIPv4(server["server"] as? String) == nil && !(server["server"] as? String ?? "").isEmpty
+        }
+        guard needs else { return }
+        if !servers.contains(where: { ($0["tag"] as? String) == "dns-bootstrap" }) {
+            servers.insert(["type": "udp", "tag": "dns-bootstrap", "server": "8.8.8.8"], at: 0)
+        }
+        for index in servers.indices {
+            let type = servers[index]["type"] as? String ?? ""
+            if type == "local" || type == "dhcp" { continue }
+            if (servers[index]["tag"] as? String) == "dns-bootstrap" { continue }
+            if servers[index]["domain_resolver"] != nil { continue }
+            if optionalIPv4(servers[index]["server"] as? String) == nil {
+                servers[index]["domain_resolver"] = "dns-bootstrap"
+            }
+        }
     }
 
     /// Destinations that skip the tunnel at the kernel (physical interface).
