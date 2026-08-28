@@ -110,6 +110,7 @@ public enum AgentHTTP {
         }
 
         let proxyType = AgentSettings.proxyType
+        let httpProxy = proxyType == "http" || proxyType == "https"
         let started = Date()
         DiagnosticsLog.log("app", "http-start", "\(method) \(host):\(port) proxy=\(useProxy ? proxyType : "off") utun=\(prohibitOther ? "off" : "any")")
 
@@ -128,12 +129,12 @@ public enum AgentHTTP {
         }
 
         let path: String
-        if useProxy, proxyType == "http", !tls {
+        if useProxy, httpProxy, !tls {
             path = url.absoluteString
             if !AgentSettings.proxyUser.isEmpty {
                 headers["Proxy-Authorization"] = basicAuth(AgentSettings.proxyUser, AgentSettings.proxyPassword)
             }
-        } else if useProxy, proxyType == "http", tls {
+        } else if useProxy, httpProxy, tls {
             try await httpConnect(connection, host: host, port: port)
             path = urlRequestPath(url)
         } else {
@@ -266,7 +267,7 @@ public enum AgentHTTP {
         let started = Date()
         let connection = try await connect(host: AgentSettings.proxyHost, port: UInt16(AgentSettings.proxyPort), tls: false, prohibitOther: true, timeout: 8)
         defer { connection.cancel() }
-        if AgentSettings.proxyType == "http" {
+        if AgentSettings.proxyType == "http" || AgentSettings.proxyType == "https" {
             try await httpConnect(connection, host: "1.1.1.1", port: 443)
         } else {
             try await socks5Connect(connection, host: "1.1.1.1", port: 443)
@@ -526,7 +527,7 @@ public enum AgentHTTP {
         if !AgentSettings.proxyUser.isEmpty {
             packet += "Proxy-Authorization: \(basicAuth(AgentSettings.proxyUser, AgentSettings.proxyPassword))\r\n"
         }
-        packet += "Proxy-Connection: Keep-Alive\r\n\r\n"
+        packet += "Connection: close\r\n\r\n"
         try await send(connection, Data(packet.utf8))
         let raw = try await receiveUntilHeaders(connection)
         let reply = try parseHTTP(raw)

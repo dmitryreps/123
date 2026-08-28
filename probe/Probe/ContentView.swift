@@ -190,8 +190,15 @@ struct ProxyProbePage: View {
                     Picker("Type", selection: $proxyType) {
                         Text("SOCKS5").tag("socks5")
                         Text("HTTP").tag("http")
+                        Text("HTTPS").tag("https")
                     }
                     .pickerStyle(.segmented)
+                    .onChange(of: proxyType, perform: { value in
+                        if value == "https" {
+                            target = "https://api.ipify.org"
+                            wrap = "none"
+                        }
+                    })
 
                     HStack(alignment: .bottom, spacing: 12) {
                         field("Host", text: $host)
@@ -220,7 +227,7 @@ struct ProxyProbePage: View {
                         Text("TLS").tag("tls")
                     }
                     .pickerStyle(.segmented)
-                    Text("TLS only if the proxy itself speaks TLS (stunnel / nginx stream). Raw SOCKS on TLS will fail — that is the test.")
+                    Text("HTTPS here is an HTTP CONNECT proxy for https:// sites. Wrap stays None. Do not turn on TLS wrap unless the proxy port itself speaks TLS.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
@@ -297,7 +304,7 @@ struct ProxyProbePage: View {
     private func go(_ test: ProxyTest) {
         busy = true
         let input = ProxyInput(
-            kind: ProxyKind(rawValue: proxyType) ?? .socks5,
+            kind: ProxyKind(rawValue: proxyType) ?? .https,
             host: host.trimmingCharacters(in: .whitespacesAndNewlines),
             port: UInt16(port) ?? 1080,
             user: login.trimmingCharacters(in: .whitespacesAndNewlines),

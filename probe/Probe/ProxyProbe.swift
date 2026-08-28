@@ -5,6 +5,7 @@ import UIKit
 enum ProxyKind: String {
     case socks5
     case http
+    case https
 }
 
 enum ProxyWrap: String {
@@ -74,21 +75,43 @@ enum ProxyProbe {
     }
 
     private static func handshake(input: ProxyInput, log: ProxyLog) async throws -> ProbeDump {
-        let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
+        let target = handshakeTarget(input)
         log.line("CONNECT_HOST", target.host)
         log.line("CONNECT_PORT", "\(target.port)")
+        log.line("CONNECT_TLS_SITE", target.tls ? "yes" : "no")
         let started = Date()
-        let connection = try await openTunnel(input: input, dest: target, log: log)
-        connection.cancel()
-        let ms = Int(Date().timeIntervalSince(started) * 1000)
-        log.line("ELAPSED_MS", "\(ms)")
-        log.line("RESULT", "success")
-        log.line("MEANING", "Proxy login and CONNECT succeeded. This is not a full-page download.")
-        return log.dump(ok: true, title: "SUCCESS · handshake \(ms) ms")
+        do {
+            let connection = try await openTunnel(input: input, dest: target, log: log)
+            connection.cancel()
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            log.line("STACK", "connect")
+            log.line("ELAPSED_MS", "\(ms)")
+            log.line("RESULT", "success")
+            log.line("MEANING", "Proxy login and CONNECT succeeded.")
+            return log.dump(ok: true, title: "SUCCESS · handshake \(ms) ms")
+        } catch {
+            log.append(error, prefix: "CONNECT")
+            guard input.kind == .https || target.tls else { throw error }
+            log.line("STEP", "handshake-fallback-urlsession")
+            let got = try await urlSessionViaProxy(input: input, target: target)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            let ip = extractIP(got.text)
+            log.line("STACK", "urlsession-https")
+            log.line("ELAPSED_MS", "\(ms)")
+            log.line("HTTP_STATUS", "\(got.status)")
+            log.line("SEEN_IP", ip)
+            if got.status == 200, !ip.isEmpty {
+                log.line("RESULT", "success")
+                log.line("MEANING", "Raw CONNECT was reset. URLSession HTTPS via this HTTP CONNECT proxy works. Use that path.")
+                return log.dump(ok: true, title: "SUCCESS · URLSession \(ip)")
+            }
+            log.line("RESULT", "error")
+            return log.dump(ok: false, title: "ERROR · HTTPS handshake")
+        }
     }
 
     private static func whoami(input: ProxyInput, log: ProxyLog) async throws -> ProbeDump {
-        let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
+        let target = whoamiTarget(input)
         log.line("WHOAMI_HOST", target.host)
         log.line("WHOAMI_PORT", "\(target.port)")
         log.line("WHOAMI_TLS", target.tls ? "yes" : "no")
@@ -139,7 +162,7 @@ enum ProxyProbe {
         log.line("STEP", "direct")
         let directStarted = Date()
         do {
-            let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
+            let target = whoamiTarget(input)
             if target.tls {
                 log.line("DIRECT_STACK", "urlsession-https")
                 let got = try await urlSessionDirect(target: target)
@@ -302,7 +325,7 @@ enum ProxyProbe {
     }
 
     private static func whoamiInner(input: ProxyInput) async throws -> WhoamiDump {
-        let target = try parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: 80)
+        let target = whoamiTarget(input)
         let started = Date()
         if target.tls {
             let got = try await urlSessionViaProxy(input: input, target: target)
@@ -337,6 +360,19 @@ enum ProxyProbe {
         var tls: Bool
     }
 
+    private static func handshakeTarget(_ input: ProxyInput) -> Target {
+        let parsed = (try? parseTarget(input.targetURL, fallbackHost: "api.ipify.org", fallbackPort: input.kind == .https ? 443 : 80))
+            ?? Target(host: "api.ipify.org", port: 443, path: "/", tls: true)
+        if input.kind == .https {
+            return Target(host: parsed.host, port: 443, path: parsed.path, tls: true)
+        }
+        return parsed
+    }
+
+    private static func whoamiTarget(_ input: ProxyInput) -> Target {
+        handshakeTarget(input)
+    }
+
     private static func parseTarget(_ raw: String, fallbackHost: String, fallbackPort: UInt16) throws -> Target {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -366,7 +402,7 @@ enum ProxyProbe {
             timeout: 10
         )
         log.line("STEP", "tcp-ready")
-        if input.kind == .http {
+        if input.kind == .http || input.kind == .https {
             log.line("STEP", "http-connect")
             try await httpConnect(connection, host: dest.host, port: dest.port, user: input.user, password: input.password)
         } else {
@@ -540,12 +576,13 @@ enum ProxyProbe {
     }
 
     private static func httpConnect(_ connection: NWConnection, host: String, port: UInt16, user: String, password: String) async throws {
-        var packet = "CONNECT \(host):\(port) HTTP/1.1\r\nHost: \(host):\(port)\r\n"
+        var packet = "CONNECT \(host):\(port) HTTP/1.1\r\n"
+        packet += "Host: \(host):\(port)\r\n"
         if !user.isEmpty {
             let raw = "\(user):\(password)"
             packet += "Proxy-Authorization: Basic \(Data(raw.utf8).base64EncodedString())\r\n"
         }
-        packet += "Proxy-Connection: Keep-Alive\r\n\r\n"
+        packet += "Connection: close\r\n\r\n"
         try await send(connection, Data(packet.utf8))
         let raw = try await receiveUntilHeaders(connection)
         let reply = try parseHTTP(raw)
@@ -615,7 +652,7 @@ enum ProxyProbe {
     }
 
     private static func proxyDictionary(_ input: ProxyInput) -> [AnyHashable: Any] {
-        if input.kind == .http {
+        if input.kind == .http || input.kind == .https {
             return [
                 "HTTPEnable": 1,
                 "HTTPProxy": input.host,

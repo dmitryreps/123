@@ -38,7 +38,7 @@ enum ShareLinkImport {
         password: String,
         environments: ExtensionEnvironments
     ) async throws {
-        let outboundType = type == "http" ? "http" : "socks"
+        let outboundType = (type == "http" || type == "https") ? "http" : "socks"
         var outbound: [String: Any] = [
             "type": outboundType,
             "tag": "proxy",

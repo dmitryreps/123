@@ -521,6 +521,7 @@
                     Picker("Type", selection: $type) {
                         Text("SOCKS5").tag("socks5")
                         Text("HTTP").tag("http")
+                        Text("HTTPS").tag("https")
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 20)
@@ -729,6 +730,7 @@
                         Picker("Type", selection: $viewModel.proxyType) {
                             Text("SOCKS5").tag("socks5")
                             Text("HTTP").tag("http")
+                            Text("HTTPS").tag("https")
                         }
                         TextField("Host", text: $viewModel.proxyHost)
                             .textInputAutocapitalization(.never)
